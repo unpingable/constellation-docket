@@ -89,6 +89,31 @@ The new host-mechanics premise is that qualified Crow provides the measured
 standard `/bin/kill` process-group operation. It does not enter Docket,
 Stage-0, or guest semantics.
 
+## Parallel local-ID collision found by the full gate
+
+The exact repair-only commit's full-suite gate exposed a second predecessor
+defect. A serial `read_surface` suite passed, while repeated default-parallel
+runs failed at different witnesses. Preserving and tracing a failed specimen
+proved that two fixtures had received the identical dispatch ID
+`301ef90d3658ffd4ca5d8e7d4d56f5df`. Both therefore selected the same global
+`/tmp/gwr-index-<dispatch>` path.
+
+One broker's journal stopped at `received -> verified`; its `git read-tree`
+exited 128 on the shared index while the other fixture used it. The two exact
+envelope and journal paths were:
+
+- `/tmp/gwr-reads-list-qualified-661349/journals/301ef90d3658ffd4ca5d8e7d4d56f5df.*`
+- `/tmp/gwr-reads-secrets-661349/journals/301ef90d3658ffd4ca5d8e7d4d56f5df.*`
+
+`HashChainIds::new` had described its seed as process-unique but bound only
+the current time and PID. Concurrent constructors in one process could observe
+the same time and therefore mint identical chains. This was a genuine
+`gwr-local` mechanics defect, not a Stage-0 or transport result.
+
+The seed transcript now also binds a process-local monotonic atomic instance
+coordinate. A 64-thread barrier test proves distinct first identities from
+concurrent sources. No wire shape, authority, outcome, or layering changed.
+
 ## Qualification
 
 Exact results:
@@ -97,7 +122,13 @@ Exact results:
 cargo test -p gwr-local --test provider_contract_codex --quiet
 PASS: 7 passed
 
-100 repeated default-parallel isolated suite runs
+100 repeated default-parallel provider-contract suite runs
+PASS: 100 passed, 0 failed
+
+cargo test -p gwr-local --test read_surface --quiet
+PASS: 9 passed
+
+100 repeated default-parallel read-surface suite runs
 PASS: 100 passed, 0 failed
 
 cargo clippy -p gwr-local --test provider_contract_codex -- -D warnings
