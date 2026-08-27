@@ -13,8 +13,9 @@ use gwr_runtime::ports::labor_provider::{
     BoundedAssignment, LaborProvider, PreparationOutcome, PreparationReport, ProvenanceEntry,
     ProviderError, ProviderEvent, SequencedEvent,
 };
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Populate a disposable workspace with a detached checkout of the exact basis.
@@ -102,6 +103,15 @@ fn workspace_diff(workspace: &Path) -> Result<Vec<u8>, String> {
     Ok(diff.stdout)
 }
 
+fn kill_process_group(child: &mut Child) {
+    let group = format!("-{}", child.id());
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &group])
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl LaborProvider for CodexExecProvider {
     fn prepare(
         &mut self,
@@ -120,6 +130,7 @@ impl LaborProvider for CodexExecProvider {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| ProviderError::Died(format!("spawn codex: {e}")))?;
 
@@ -130,8 +141,7 @@ impl LaborProvider for CodexExecProvider {
                 Ok(Some(status)) => break status,
                 Ok(None) => {
                     if started.elapsed() > self.timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_process_group(&mut child);
                         return Err(ProviderError::Died(format!(
                             "codex exceeded bound of {:?}",
                             self.timeout
