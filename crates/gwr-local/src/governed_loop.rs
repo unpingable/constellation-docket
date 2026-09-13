@@ -28,7 +28,7 @@ use gwr_runtime::ports::governed_loop::{
 };
 use gwr_runtime::services::governed_loop as governed_service;
 use ring::signature::{UnparsedPublicKey, ED25519};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
@@ -328,9 +328,13 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
         custody: &DocketCustodyWireV1,
         executor_binding: &ExecutorBindingV1,
     ) -> Result<(), String> {
+        // Enrollment/currentness reads and the one-use inserts are one
+        // serialized transition. Beginning IMMEDIATE avoids a deferred
+        // read-to-write upgrade race; an identical concurrent delivery waits,
+        // then the service recovers the already committed same envelope.
         let transaction = self
             .connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("governed-custody-transaction:{error}"))?;
         let enrolled_now:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM local_execution_standing_deployment WHERE singleton=1 AND mode='snapshot_currentness' AND max_lifetime_ms=300000)",[],|row|row.get(0)).map_err(|error|format!("local-standing-enrollment-read:{error}"))?;
         let require_local_snapshot = self.require_local_snapshot || enrolled_now;
