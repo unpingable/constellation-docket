@@ -107,10 +107,9 @@ impl JournalEvent {
                         previous: CommitHash::new(previous),
                         result: CommitHash::new(result),
                     }
-                } else if let Some(ground) = line.strip_prefix("refused ") {
-                    Self::Refused(DispatchRefusalGround::from_tag(ground)?)
                 } else {
-                    return None;
+                    let ground = line.strip_prefix("refused ")?;
+                    Self::Refused(DispatchRefusalGround::from_tag(ground)?)
                 }
             }
         })
