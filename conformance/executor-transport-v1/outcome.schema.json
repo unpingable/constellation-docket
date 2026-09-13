@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "docket.governed-executor-outcome/v1",
+  "title": "Docket governed-executor outcome V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attempt", "marker", "receipt", "outcome"],
+  "properties": {
+    "attempt": {"$ref": "#/$defs/digest"},
+    "marker": {"$ref": "#/$defs/digest"},
+    "receipt": {"$ref": "#/$defs/digest"},
+    "outcome": {"enum": ["success", "failure", "indeterminate"]}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}

@@ -124,14 +124,19 @@ docs/governed-runtime  the normative specification, audits, and freeze record.
 
 ## Campaign selection
 
-Use Docket when work needs durable attempt custody, exact dispatch evidence, or
-reconciliation; keep bounded edits on the ordinary repository workflow. Start
-with `cargo run -p gwr-local --bin docket -- --help` and
-`docs/governed-runtime/operator-runbook.md`, using an owner-approved state
-root, repository registration, effect class, provider, and standing profile.
+Use Docket when work needs durable attempt custody, exact executor dispatch
+evidence, or same-attempt reconciliation. Begin with
+`cargo run -p gwr-local --bin docket -- --help`, this repository's operator
+runbook, and an owner-approved state root and deployment profile. The executable
+has one root help surface; do not assume every command implements `--help`.
+
+For a governed-loop issuance, use `docket governed-loop inspect --state ...
+--issuance ...` for read-only inspection. Classic Git-effect attempts instead
+use `docket show` and `docket journal` with their actual attempt or dispatch
+identities. Never substitute the classic read commands for governed-loop
+custody inspection.
 
 For prolonged work, use the campaign-approved durable producer and checkpoint.
-After supervisor interruption, inspect the original attempt with `docket show`
-and `docket journal`, then reconcile indeterminate state before any successor.
-Tool availability grants no standing or authority. When custody is unavailable,
-use the documented fallback with a reduced claim.
+After supervisor loss, reconcile the original retained identity before any
+successor. Tool availability grants no standing or authority, and a path or
+configuration argument is not authorization.

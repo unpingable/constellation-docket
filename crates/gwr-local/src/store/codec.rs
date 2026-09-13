@@ -1,6 +1,11 @@
 //! Exact, explicit encodings between core types and SQLite columns. No JSON,
 //! no serde: every tag and list format here is part of the store's schema.
 
+use gwr_core::campaign::adjudication::{AdjudicationVerdict, ResidualStatement};
+use gwr_core::campaign::proposal::{RepairBasis, RepoPin, StageBasis};
+use gwr_core::campaign::{
+    RepairScopeClass, ReviewRequirement, StageClass, StageEffectClass, WorkerRole,
+};
 use gwr_core::digest::Sha256Digest;
 use gwr_core::domain::standing::StandingAct;
 use gwr_core::ids::*;
@@ -246,6 +251,185 @@ pub fn parse_reliance_refusal(
 pub fn parse_claim_tag(tag: &str) -> Result<gwr_core::domain::evidence::Claim, CorruptColumn> {
     gwr_core::domain::evidence::Claim::from_tag(tag)
         .ok_or_else(|| CorruptColumn(format!("unknown claim tag {tag:?}")))
+}
+
+// Campaign-stage standing (S-2) encodings. Same rule as everywhere else in
+// this store: explicit, length-prefixed, versioned by the core transcripts —
+// no JSON, no delimiter scanning.
+
+fn corrupt<T>(what: &str) -> Result<T, CorruptColumn> {
+    Err(CorruptColumn(format!("corrupt campaign encoding: {what}")))
+}
+
+pub fn stage_class_tag(class: StageClass) -> &'static str {
+    class.tag()
+}
+
+pub fn parse_stage_class(tag: &str) -> Result<StageClass, CorruptColumn> {
+    StageClass::from_tag(tag)
+        .ok_or_else(|| CorruptColumn(format!("unknown stage class tag {tag:?}")))
+}
+
+pub fn role_tag(role: WorkerRole) -> &'static str {
+    role.tag()
+}
+
+pub fn parse_role(tag: &str) -> Result<WorkerRole, CorruptColumn> {
+    WorkerRole::from_tag(tag).ok_or_else(|| CorruptColumn(format!("unknown role tag {tag:?}")))
+}
+
+pub fn stage_effect_tag(class: StageEffectClass) -> &'static str {
+    class.tag()
+}
+
+pub fn parse_stage_effect(tag: &str) -> Result<StageEffectClass, CorruptColumn> {
+    StageEffectClass::from_tag(tag)
+        .ok_or_else(|| CorruptColumn(format!("unknown stage effect class tag {tag:?}")))
+}
+
+pub fn review_requirement_tag(req: ReviewRequirement) -> &'static str {
+    req.tag()
+}
+
+pub fn parse_review_requirement(tag: &str) -> Result<ReviewRequirement, CorruptColumn> {
+    ReviewRequirement::from_tag(tag)
+        .ok_or_else(|| CorruptColumn(format!("unknown review requirement tag {tag:?}")))
+}
+
+pub fn adjudication_verdict_tag(verdict: AdjudicationVerdict) -> &'static str {
+    verdict.tag()
+}
+
+pub fn parse_adjudication_verdict(tag: &str) -> Result<AdjudicationVerdict, CorruptColumn> {
+    AdjudicationVerdict::from_tag(tag)
+        .ok_or_else(|| CorruptColumn(format!("unknown adjudication verdict tag {tag:?}")))
+}
+
+/// Repository pins: a length-prefixed list of length-prefixed triples
+/// (locator, commit, tree). Nesting is safe because the encoding never scans
+/// content for structure.
+pub fn encode_pins(pins: &[RepoPin]) -> String {
+    let triples: Vec<String> = pins
+        .iter()
+        .map(|p| {
+            join_list(&[
+                p.repository.as_str().to_string(),
+                p.commit.as_str().to_string(),
+                p.tree.clone(),
+            ])
+        })
+        .collect();
+    join_list(&triples)
+}
+
+pub fn decode_pins(encoded: &str) -> Result<Vec<RepoPin>, CorruptColumn> {
+    let mut out = Vec::new();
+    for triple in split_list(encoded) {
+        let fields = split_list(&triple);
+        if fields.len() != 3 {
+            return corrupt("repository pin is not a triple");
+        }
+        out.push(RepoPin {
+            repository: repo(&fields[0]),
+            commit: commit(&fields[1]),
+            tree: fields[2].clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// A stage basis: kind tag plus its fields, one encoding per kind.
+pub fn encode_basis(basis: &StageBasis) -> (String, String, String, Option<String>) {
+    match basis {
+        StageBasis::RootAuthorization { identity } => (
+            "root_authorization".to_string(),
+            identity.clone(),
+            String::new(),
+            None,
+        ),
+        StageBasis::PredecessorStage {
+            stage,
+            adjudication_digest,
+        } => (
+            "predecessor_stage".to_string(),
+            String::new(),
+            stage.clone(),
+            Some(adjudication_digest.to_hex()),
+        ),
+    }
+}
+
+pub fn decode_basis(
+    kind: &str,
+    identity: &str,
+    stage: &str,
+    adjudication: Option<&str>,
+) -> Result<StageBasis, CorruptColumn> {
+    match kind {
+        "root_authorization" => Ok(StageBasis::RootAuthorization {
+            identity: identity.to_string(),
+        }),
+        "predecessor_stage" => Ok(StageBasis::PredecessorStage {
+            stage: stage.to_string(),
+            adjudication_digest: parse_digest(adjudication.ok_or_else(|| {
+                CorruptColumn("predecessor basis lacks adjudication digest".into())
+            })?)?,
+        }),
+        other => corrupt(&format!("unknown basis kind {other:?}")),
+    }
+}
+
+/// A repair basis: one length-prefixed record of scalar fields and nested
+/// length-prefixed lists.
+pub fn encode_repair_basis(basis: &RepairBasis) -> String {
+    join_list(&[
+        basis.original_stage.clone(),
+        basis.rejected_review_receipt.to_hex(),
+        basis.scope_class.tag().to_string(),
+        basis.review_requirement.tag().to_string(),
+        join_list(&basis.finding_ids),
+        join_list(&basis.nonclaims),
+    ])
+}
+
+pub fn decode_repair_basis(encoded: &str) -> Result<RepairBasis, CorruptColumn> {
+    let fields = split_list(encoded);
+    if fields.len() != 6 {
+        return corrupt("repair basis does not have six fields");
+    }
+    Ok(RepairBasis {
+        original_stage: fields[0].clone(),
+        rejected_review_receipt: parse_digest(&fields[1])?,
+        scope_class: RepairScopeClass::from_tag(&fields[2])
+            .ok_or_else(|| CorruptColumn(format!("unknown repair scope class {:?}", fields[2])))?,
+        review_requirement: parse_review_requirement(&fields[3])?,
+        finding_ids: split_list(&fields[4]),
+        nonclaims: split_list(&fields[5]),
+    })
+}
+
+/// Residual statements: a length-prefixed list of (kind, statement) pairs.
+pub fn encode_residuals(residuals: &[ResidualStatement]) -> String {
+    let pairs: Vec<String> = residuals
+        .iter()
+        .map(|r| join_list(&[r.kind.clone(), r.statement.clone()]))
+        .collect();
+    join_list(&pairs)
+}
+
+pub fn decode_residuals(encoded: &str) -> Result<Vec<ResidualStatement>, CorruptColumn> {
+    let mut out = Vec::new();
+    for pair in split_list(encoded) {
+        let fields = split_list(&pair);
+        if fields.len() != 2 {
+            return corrupt("residual is not a (kind, statement) pair");
+        }
+        out.push(ResidualStatement {
+            kind: fields[0].clone(),
+            statement: fields[1].clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// Nullable projection columns, as read.

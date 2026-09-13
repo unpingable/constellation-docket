@@ -1,28 +1,36 @@
-# Governed Work Runtime (gwr)
+# Docket — constellation-docket
 
-New here? Read the [Docket newcomer guide](docs/public-guide.md) for the
-source-build, inspection, trust-boundary, and recovery entry points.
+Docket tracks an authorized execution attempt, sends its exact work to an
+executor, and retains the result so an interrupted attempt can be inspected
+and reconciled without blindly running it again.
 
-A local-first governed work runtime for exact AI-mediated repository effects.
+Start with the [Docket component guide](docs/public-guide.md) for current
+execution-custody boundaries, entry points, trust premises, and recovery.
+
+The existing `gwr-*` crate names and `docket` / `gwr-git-broker` command names
+are unchanged.
 
 The trusted runtime establishes mechanical facts only; domain modules own semantic
 judgments; labor providers produce candidate artifacts and untrusted provenance. The
 normative specification lives in `docs/governed-runtime/`.
 
-Docket is **agent-neutral but currently Git-effect-specific**: exactly one effect class
-is admitted — the atomic Git target-ref transition, `GitRefEffect` — and a proposal
-outside it is refused with a typed refusal *before* any standing is issued, any
+The frozen Git-effect baseline admits one effect class: the atomic Git target-ref
+transition, `GitRefEffect`. Within that workflow, a proposal outside it is refused
+with a typed refusal *before* any standing is issued, any
 reservation is created, any dispatch identity is minted, or any provider runs
 ([`effect-classes.md`](docs/governed-runtime/effect-classes.md)). Recovery guarantees
 are properties of that class and its stated premises, not universal Docket guarantees.
+Current source also supports the separate [governed executor transport](docs/governed-runtime/executor-transport-v1.md).
+Its recovery behavior depends on the selected executor and tested composition.
 
 ## Status
 
-Docket is the **governed-execution office** of a four-office constellation:
-Nightshift proposes bounded intent, **AG ng** authorizes the exact prepared
-attempt (one-use authority burn), Docket prepares exact bytes, executes via
-its broker, and settles with evidence, and **NQ** evaluates the exported
-dossier against registered claims and consumer reliance. Docket owns both
+In Constellation's supported governed paths, Nightshift records observations and
+proposals, `constellation-ag` authorizes exact bounded work, and Docket owns the
+attempt and its execution records. `constellation-nq` supplies profile-specific
+evidence admission and checks; the selected composition determines where those
+checks apply. A settled attempt is not necessarily successful and does not grant
+permission for another run. Docket retains the older
 authorization wire contracts (`gwr:authz-request:v1`, `ag.docket-issuance:v1`)
 and their conformance vectors; it does not own authorization policy, claim
 admissibility, or orchestration posture — and its own reliance bridge refuses
@@ -72,6 +80,7 @@ might expect to be enforced are deliberately written down there as premises inst
 | What each outcome means and what to do next | [`operator-runbook.md`](docs/governed-runtime/operator-runbook.md) |
 | First upstream-authorized governed change | [`vertical-01.md`](docs/vertical-01.md) |
 | How upstream authorization becomes local standing | [`upstream-authorization.md`](docs/governed-runtime/upstream-authorization.md) |
+| Prospective Docket-local governed-loop standing | [`local-execution-standing.md`](docs/governed-runtime/local-execution-standing.md) |
 
 Documents cite an external "normative packet" as their requirements source. That packet is
 held privately and is not part of this repository; the citations are to an external source,
@@ -93,6 +102,30 @@ The `docket` and `gwr-git-broker` executables must remain siblings, unless
 an optional `cargo install --path` flow, clean state creation, provider configuration, and
 supported versus unsupported invocation paths are recorded in
 [`source-install-and-bootstrap.md`](docs/governed-runtime/source-install-and-bootstrap.md).
+
+The canonical AG governed-loop custody record has one narrow read-only
+projection for the local operator inspector:
+
+```bash
+docket governed-loop inspect --state /absolute/state --issuance sha256:...
+```
+
+It opens the existing custody database read-only and emits
+`docket.governed-loop.inspection/v1`, including the exact authenticated AG
+issuance, issuer/key identity, custody, executor binding, and known or
+indeterminate outcome. It invokes no standing resolver or executor and does
+not reconcile or alter custody.
+
+### Governed-executor transport ownership
+
+Docket owns the generic, versioned dispatch/outcome/reconcile transport law.
+Its independent specification, closed V1 schemas, and conformance vectors are
+[`executor-transport-v1.md`](docs/governed-runtime/executor-transport-v1.md)
+and [`conformance/executor-transport-v1/`](conformance/executor-transport-v1/).
+Executors retain ownership of their sealed plans, mechanics, journals, and
+receipt formats; AG retains governed occurrence and authorization semantics.
+Consumers intentionally keep independent implementations rather than sharing
+Docket runtime code.
 
 ## Workspace
 

@@ -9,6 +9,7 @@
 
 pub mod authorization;
 pub mod bridge;
+pub mod campaign;
 pub mod digest;
 pub mod domain;
 pub mod effect_spec;

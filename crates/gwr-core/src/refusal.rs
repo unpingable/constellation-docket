@@ -174,6 +174,106 @@ impl RelianceRefusal {
     }
 }
 
+/// Refusals from the campaign-stage standing domain.
+///
+/// Deliberately a separate domain from [`StandingRefusal`]: campaign-stage
+/// standing is not effect standing, shares no scope type with it, and never
+/// converts into it. Variants that name a class, path, or repository carry it
+/// so the refusal says what was refused.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CampaignRefusal {
+    /// The requested stage class is not in the campaign vocabulary at all.
+    UnknownStageClass { class: String },
+    /// The class is in the vocabulary, but this runtime never issues standing
+    /// for it (new source scope, architecture, authority, basis, candidate,
+    /// freeze, qualification, certificate, registry, deployment).
+    StageClassNeverAdmitted { class: String },
+    /// A required proposal field was empty.
+    EmptyField { field: &'static str },
+    /// A repository pin's commit or tree is not an exact lowercase-hex object
+    /// id, so no exact basis is being proposed.
+    RepositoryPinNotExact { repository: String },
+    /// A stage over zero repositories governs nothing.
+    NoRepositories,
+    /// A stage over zero paths authorizes nothing.
+    NoAdmittedPaths,
+    /// A path is not repository-relative (absolute, traversing, or malformed).
+    PathNotAdmissible { path: String },
+    /// The proposal's worker role is not the role its stage class requires.
+    RoleMismatch,
+    /// The proposal's effect class is not the one its stage class permits.
+    EffectClassNotPermitted {
+        stage_class: &'static str,
+        effect_class: &'static str,
+    },
+    /// Reviewer standing permits read/test effects only; the requested
+    /// mutation is named in the refusal.
+    ReviewerMutationForbidden { op: String },
+    /// Reviewer standing binds an isolated worktree identity; none was given.
+    ReviewerWorktreeMissing,
+    /// A repair stage class was proposed without a repair basis.
+    RepairBasisMissing,
+    /// A non-repair stage class carried a repair basis.
+    RepairBasisUnexpected,
+    /// The repair scope class does not match the repair stage class.
+    RepairScopeMismatch,
+    /// A repair basis named no findings.
+    RepairFindingsMissing,
+    /// No adjudication authorizing exact repair covers this review receipt.
+    RepairNotAuthorized { verdict: &'static str },
+    /// The repair proposal's predecessor basis cites no recorded
+    /// adjudication by exact digest — or cites no adjudication at all.
+    /// Repair standing requires the exact adjudication identity; a stage
+    /// name or a receipt alone does not identify one.
+    RepairAdjudicationUnknown,
+    /// More than one consumed standing for the original stage carries the
+    /// adjudicated review receipt, so the original stage authority cannot be
+    /// resolved exactly. Admission refuses rather than guess.
+    RepairOriginalStandingAmbiguous,
+    /// A repair-authority bundle disagrees with Docket's own re-derived
+    /// authority in the named field — a substituted, corrupted, or foreign
+    /// artifact.
+    RepairAuthorityMismatch { field: &'static str },
+    /// The repair basis cites a different review receipt than the one the
+    /// authorizing adjudication records.
+    RepairReviewReceiptMismatch,
+    /// The repair basis's finding set differs from the adjudication's.
+    RepairFindingsMismatch,
+    /// The repair basis names a different original stage than the proposal
+    /// whose authority it claims to repair within.
+    RepairOriginalStageMismatch,
+    /// A requested repair path lies outside the original stage authority's
+    /// allowed paths.
+    RepairPathOutsideOriginalScope { path: String },
+    /// A requested repair repository lies outside the original stage
+    /// authority's repositories.
+    RepairRepositoryOutsideScope { repository: String },
+    /// The execution context names a different campaign than the standing.
+    CampaignMismatch,
+    /// The execution context names a different stage than the standing.
+    StageMismatch,
+    /// The execution context presents a different proposal digest than the
+    /// standing binds — including a proposal whose source basis was altered.
+    ProposalMismatch,
+    /// The standing's window has closed against the runtime clock.
+    Expired,
+    /// The standing's one consumption is already spent.
+    AlreadyConsumed,
+    /// A newer standing exists for this campaign and stage; this one is
+    /// historical and cannot be presented as current.
+    Superseded,
+    /// Standing consumed, effect outcome unresolved: re-execution would guess.
+    OutcomeUnresolved,
+    /// Effect completed but no receipt is recorded: re-execution would guess.
+    ReceiptMissing,
+    /// The effect completed and is receipted; a second execution is a
+    /// duplicate effect.
+    EffectAlreadyReceipted,
+    /// The review receipt an adjudication names was never recorded as the
+    /// outcome of a consumed standing for that campaign and stage.
+    AdjudicationSubjectUnknown,
+}
+
 /// Refusals from recovery resolution.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecoveryRefusal {

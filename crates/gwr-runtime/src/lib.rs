@@ -2,5 +2,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod governed_loop;
 pub mod ports;
 pub mod services;

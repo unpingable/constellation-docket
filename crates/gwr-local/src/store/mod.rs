@@ -1,13 +1,19 @@
 //! SQLite implementation of the store port: transactional current-state
 //! projections plus immutable typed ledger records.
 
-mod codec;
+pub(crate) mod codec;
 
 use codec::*;
 use gwr_core::authorization::{
     AcceptedIssuance, AuthorizationSource, UpstreamPremise, UpstreamResidual,
     UpstreamResidualStatus,
 };
+use gwr_core::campaign::adjudication::AdjudicationReceipt;
+use gwr_core::campaign::proposal::CampaignStageProposal;
+use gwr_core::campaign::standing::{
+    CampaignStageConsumption, CampaignStageStanding, CampaignStandingState,
+};
+use gwr_core::digest::Sha256Digest;
 use gwr_core::domain::reservation::{ClaimState, ReservationClaim};
 use gwr_core::domain::standing::{GrantState, StandingGrant, StandingScope, StandingUse};
 use gwr_core::ids::*;
@@ -23,7 +29,8 @@ use gwr_core::refusal::RelianceRefusal;
 use gwr_core::repository::{RepositoryAlias, RepositoryAliasKind, RepositoryRegistration};
 use gwr_core::work_request::{ClockReading, RepositoryLocator, WorkRequest};
 use gwr_runtime::ports::store::{
-    ProjectedAttempt, RelianceRefusalRecord, RelianceSubject, Store, StoreError, TimelineEntry,
+    CampaignBurn, ProjectedAttempt, RelianceRefusalRecord, RelianceSubject, Store, StoreError,
+    TimelineEntry,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::Path;
@@ -32,6 +39,9 @@ const MIGRATION: &str = include_str!("../../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../../migrations/0002_reliance_subject.sql");
 const MIGRATION_0003: &str = include_str!("../../migrations/0003_authz_issuance.sql");
 const MIGRATION_0004: &str = include_str!("../../migrations/0004_repository_registry.sql");
+const MIGRATION_0005: &str = include_str!("../../migrations/0005_campaign_stage_standing.sql");
+const MIGRATION_0006: &str = include_str!("../../migrations/0006_governed_loop_custody.sql");
+const MIGRATION_0007: &str = include_str!("../../migrations/0007_local_execution_standing.sql");
 
 pub struct SqliteStore {
     conn: Connection,
@@ -49,11 +59,24 @@ fn backend(e: rusqlite::Error) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
+/// Bounded writer-contention window (P4). When another connection holds the
+/// write lock, SQLite sleeps and retries inside this budget before returning
+/// `SQLITE_BUSY`. This never changes outcomes: a waiting consumer that
+/// acquires the lock observes the committed burn and receives the exact
+/// typed replay classification; a consumer that outlasts the budget receives
+/// a bounded store error, never a success. It is not a guarantee of eventual
+/// success — only ordinary short contention gets a bounded chance to
+/// resolve. Five seconds covers process-level CLI overlap without turning a
+/// stuck writer into an unbounded hang.
+pub const SQLITE_BUSY_TIMEOUT_MS: u32 = 5_000;
+
 impl SqliteStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(backend)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(backend)?;
+        conn.pragma_update(None, "busy_timeout", SQLITE_BUSY_TIMEOUT_MS)
             .map_err(backend)?;
         Self::migrate(&conn)?;
         Ok(Self { conn })
@@ -61,6 +84,8 @@ impl SqliteStore {
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory().map_err(backend)?;
+        conn.pragma_update(None, "busy_timeout", SQLITE_BUSY_TIMEOUT_MS)
+            .map_err(backend)?;
         Self::migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -115,6 +140,15 @@ impl SqliteStore {
                 .map_err(backend)?;
         }
         conn.execute_batch(MIGRATION_0004).map_err(backend)?;
+        // 0005 adds the campaign-stage standing ledger (S-2). Idempotent
+        // (`IF NOT EXISTS`); it shares no table with the effect-standing
+        // domain and alters none.
+        conn.execute_batch(MIGRATION_0005).map_err(backend)?;
+        // 0006 is the canonical AG-issuance-bound execution-custody ledger.
+        // It shares neither authority nor storage with campaign-stage
+        // standing, AG's spend journal, or executor-local idempotency state.
+        conn.execute_batch(MIGRATION_0006).map_err(backend)?;
+        conn.execute_batch(MIGRATION_0007).map_err(backend)?;
         Ok(())
     }
 
@@ -122,6 +156,13 @@ impl SqliteStore {
     /// records. Test support only.
     pub fn execute_raw_for_test(&mut self, sql: &str) -> Result<usize, StoreError> {
         self.conn.execute(sql, []).map_err(backend)
+    }
+
+    /// Raw single-string query for tests asserting deployment properties
+    /// (for example the journal mode the durability law rides on). Test
+    /// support only.
+    pub fn query_string_for_test(&mut self, sql: &str) -> Result<String, StoreError> {
+        self.conn.query_row(sql, [], |r| r.get(0)).map_err(backend)
     }
 
     fn tx(&mut self) -> Result<Transaction<'_>, StoreError> {
@@ -472,6 +513,139 @@ fn consume_standing(
     )
     .map_err(backend)?;
     Ok(())
+}
+
+// Campaign-stage standing (S-2) row mapping. Every read path recomputes the
+// content address from the persisted fields; a mismatch is typed corruption.
+
+fn consumption_from_row_at(
+    standing: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+    o: usize,
+) -> rusqlite::Result<CampaignStageConsumption> {
+    let receipt: Option<String> = r.get(o + 6)?;
+    Ok(CampaignStageConsumption {
+        digest: parse_digest(&r.get::<_, String>(o)?).map_err(sql_corrupt)?,
+        standing,
+        campaign: r.get(o + 1)?,
+        stage: r.get(o + 2)?,
+        role: parse_role(&r.get::<_, String>(o + 3)?).map_err(sql_corrupt)?,
+        consumed_at: ClockReading(r.get::<_, i64>(o + 4)? as u64),
+        effect_completed: r.get::<_, i64>(o + 5)? != 0,
+        receipt: receipt
+            .map(|h| parse_digest(&h).map_err(sql_corrupt))
+            .transpose()?,
+    })
+}
+
+fn proposal_from_row_at(
+    digest: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+    o: usize,
+) -> rusqlite::Result<CampaignStageProposal> {
+    let basis_adjudication: Option<String> = r.get(o + 9)?;
+    let repair_basis: Option<String> = r.get(o + 19)?;
+    Ok(CampaignStageProposal {
+        digest,
+        upstream_digest: r.get(o)?,
+        campaign: r.get(o + 1)?,
+        stage: r.get(o + 2)?,
+        stage_class: parse_stage_class(&r.get::<_, String>(o + 3)?).map_err(sql_corrupt)?,
+        role: parse_role(&r.get::<_, String>(o + 4)?).map_err(sql_corrupt)?,
+        effect_class: parse_stage_effect(&r.get::<_, String>(o + 5)?).map_err(sql_corrupt)?,
+        basis: decode_basis(
+            &r.get::<_, String>(o + 6)?,
+            &r.get::<_, String>(o + 7)?,
+            &r.get::<_, String>(o + 8)?,
+            basis_adjudication.as_deref(),
+        )
+        .map_err(sql_corrupt)?,
+        repositories: decode_pins(&r.get::<_, String>(o + 10)?).map_err(sql_corrupt)?,
+        allowed_paths: split_list(&r.get::<_, String>(o + 11)?),
+        evidence_contract: r.get(o + 12)?,
+        handoff_schema: r.get(o + 13)?,
+        expires_at: ClockReading(r.get::<_, i64>(o + 14)? as u64),
+        nonce: r.get(o + 15)?,
+        isolated_worktree: r.get(o + 16)?,
+        review_requirement: parse_review_requirement(&r.get::<_, String>(o + 17)?)
+            .map_err(sql_corrupt)?,
+        nonclaims: split_list(&r.get::<_, String>(o + 18)?),
+        repair: repair_basis
+            .map(|b| decode_repair_basis(&b).map_err(sql_corrupt))
+            .transpose()?,
+        proposed_at: ClockReading(r.get::<_, i64>(o + 20)? as u64),
+    })
+}
+
+fn proposal_from_row(
+    digest: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CampaignStageProposal> {
+    proposal_from_row_at(digest, r, 0)
+}
+
+fn standing_from_row_at(
+    digest: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+    o: usize,
+) -> rusqlite::Result<CampaignStageStanding> {
+    let consumed: Option<String> = r.get(o + 12)?;
+    Ok(CampaignStageStanding::from_persisted(
+        digest,
+        parse_digest(&r.get::<_, String>(o)?).map_err(sql_corrupt)?,
+        r.get(o + 1)?,
+        r.get(o + 2)?,
+        r.get(o + 3)?,
+        parse_stage_class(&r.get::<_, String>(o + 4)?).map_err(sql_corrupt)?,
+        parse_role(&r.get::<_, String>(o + 5)?).map_err(sql_corrupt)?,
+        parse_stage_effect(&r.get::<_, String>(o + 6)?).map_err(sql_corrupt)?,
+        decode_pins(&r.get::<_, String>(o + 7)?).map_err(sql_corrupt)?,
+        split_list(&r.get::<_, String>(o + 8)?),
+        ClockReading(r.get::<_, i64>(o + 9)? as u64),
+        r.get(o + 10)?,
+        ClockReading(r.get::<_, i64>(o + 11)? as u64),
+        match consumed {
+            None => CampaignStandingState::Available,
+            Some(c) => CampaignStandingState::Consumed {
+                consumption: parse_digest(&c).map_err(sql_corrupt)?,
+            },
+        },
+    ))
+}
+
+fn standing_from_row(
+    digest: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CampaignStageStanding> {
+    standing_from_row_at(digest, r, 0)
+}
+
+fn standing_from_row_shifted(
+    digest: Sha256Digest,
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CampaignStageStanding> {
+    standing_from_row_at(digest, r, 1)
+}
+
+fn adjudication_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdjudicationReceipt> {
+    let receipt = AdjudicationReceipt {
+        digest: parse_digest(&r.get::<_, String>(0)?).map_err(sql_corrupt)?,
+        campaign: r.get(1)?,
+        stage: r.get(2)?,
+        review_receipt: parse_digest(&r.get::<_, String>(3)?).map_err(sql_corrupt)?,
+        verdict: parse_adjudication_verdict(&r.get::<_, String>(4)?).map_err(sql_corrupt)?,
+        adjudicator: r.get(5)?,
+        findings: split_list(&r.get::<_, String>(6)?),
+        residuals: decode_residuals(&r.get::<_, String>(7)?).map_err(sql_corrupt)?,
+        adjudicated_at: ClockReading(r.get::<_, i64>(8)? as u64),
+    };
+    if receipt.recompute_digest() != receipt.digest {
+        return Err(sql_corrupt(CorruptColumn(format!(
+            "campaign adjudication {} fields do not recompute to their digest",
+            receipt.digest
+        ))));
+    }
+    Ok(receipt)
 }
 
 impl Store for SqliteStore {
@@ -2358,5 +2532,563 @@ impl Store for SqliteStore {
                 Ok(Some((source, issuance)))
             }
         }
+    }
+
+    // Campaign-stage standing (S-2). Content-addressed records: every read
+    // recomputes the digest from the persisted fields and a mismatch is a
+    // typed corruption error, never a silently altered record.
+
+    fn record_campaign_proposal(&mut self, p: &CampaignStageProposal) -> Result<(), StoreError> {
+        let (basis_kind, basis_identity, basis_stage, basis_adjudication) = encode_basis(&p.basis);
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO campaign_stage_proposal
+                 (digest, upstream_digest, campaign, stage, stage_class, role, effect_class,
+                  basis_kind, basis_identity, basis_stage, basis_adjudication,
+                  repositories, allowed_paths, evidence_contract, handoff_schema,
+                  expires_at, nonce, isolated_worktree, review_requirement, nonclaims,
+                  repair_basis, proposed_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                params![
+                    p.digest.to_hex(),
+                    p.upstream_digest,
+                    p.campaign,
+                    p.stage,
+                    stage_class_tag(p.stage_class),
+                    role_tag(p.role),
+                    stage_effect_tag(p.effect_class),
+                    basis_kind,
+                    basis_identity,
+                    basis_stage,
+                    basis_adjudication,
+                    encode_pins(&p.repositories),
+                    join_list(&p.allowed_paths),
+                    p.evidence_contract,
+                    p.handoff_schema,
+                    p.expires_at.0 as i64,
+                    p.nonce,
+                    p.isolated_worktree,
+                    review_requirement_tag(p.review_requirement),
+                    join_list(&p.nonclaims),
+                    p.repair.as_ref().map(encode_repair_basis),
+                    p.proposed_at.0 as i64
+                ],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            let existing = self
+                .get_campaign_proposal(&p.digest)?
+                .ok_or_else(|| StoreError::Corrupt("campaign proposal vanished".into()))?;
+            if &existing != p {
+                return Err(StoreError::ImmutableRebind);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_campaign_proposal(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<CampaignStageProposal>, StoreError> {
+        let row: Option<CampaignStageProposal> = self
+            .conn
+            .query_row(
+                "SELECT upstream_digest, campaign, stage, stage_class, role, effect_class,
+                        basis_kind, basis_identity, basis_stage, basis_adjudication,
+                        repositories, allowed_paths, evidence_contract, handoff_schema,
+                        expires_at, nonce, isolated_worktree, review_requirement, nonclaims,
+                        repair_basis, proposed_at
+                 FROM campaign_stage_proposal WHERE digest=?1",
+                params![digest.to_hex()],
+                |r| proposal_from_row(*digest, r),
+            )
+            .optional()
+            .map_err(backend)?;
+        match row {
+            Some(p) if p.recompute_digest() != p.digest => Err(StoreError::Corrupt(format!(
+                "campaign proposal {} fields do not recompute to their digest",
+                p.digest
+            ))),
+            other => Ok(other),
+        }
+    }
+
+    fn find_campaign_proposals(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<CampaignStageProposal>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT digest, upstream_digest, campaign, stage, stage_class, role, effect_class,
+                        basis_kind, basis_identity, basis_stage, basis_adjudication,
+                        repositories, allowed_paths, evidence_contract, handoff_schema,
+                        expires_at, nonce, isolated_worktree, review_requirement, nonclaims,
+                        repair_basis, proposed_at
+                 FROM campaign_stage_proposal WHERE campaign=?1 AND stage=?2
+                 ORDER BY proposed_at, rowid",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![campaign, stage], |r| {
+                let digest = parse_digest(&r.get::<_, String>(0)?).map_err(sql_corrupt)?;
+                proposal_from_row_at(digest, r, 1)
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn record_campaign_standing(&mut self, s: &CampaignStageStanding) -> Result<(), StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO campaign_stage_standing
+                 (digest, proposal_digest, upstream_digest, campaign, stage, stage_class,
+                  role, effect_class, repositories, allowed_paths, expires_at, nonce, issued_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                params![
+                    s.digest().to_hex(),
+                    s.proposal_digest().to_hex(),
+                    s.upstream_digest(),
+                    s.campaign(),
+                    s.stage(),
+                    stage_class_tag(s.stage_class()),
+                    role_tag(s.role()),
+                    stage_effect_tag(s.effect_class()),
+                    encode_pins(s.repositories()),
+                    join_list(s.allowed_paths()),
+                    s.expires_at().0 as i64,
+                    s.nonce(),
+                    s.issued_at().0 as i64
+                ],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            let existing = self
+                .get_campaign_standing(&s.digest())?
+                .ok_or_else(|| StoreError::Corrupt("campaign standing vanished".into()))?;
+            let mut existing_available = existing.clone();
+            if let CampaignStandingState::Consumed { .. } = existing.state() {
+                // The standing row is immutable; consumption state lives in
+                // the consumption table and is not part of the comparison.
+                existing_available = CampaignStageStanding::from_persisted(
+                    existing.digest(),
+                    existing.proposal_digest(),
+                    existing.upstream_digest().to_string(),
+                    existing.campaign().to_string(),
+                    existing.stage().to_string(),
+                    existing.stage_class(),
+                    existing.role(),
+                    existing.effect_class(),
+                    existing.repositories().to_vec(),
+                    existing.allowed_paths().to_vec(),
+                    existing.expires_at(),
+                    existing.nonce().to_string(),
+                    existing.issued_at(),
+                    CampaignStandingState::Available,
+                );
+            }
+            if &existing_available != s {
+                return Err(StoreError::ImmutableRebind);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_campaign_standing(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<CampaignStageStanding>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT s.proposal_digest, s.upstream_digest, s.campaign, s.stage,
+                        s.stage_class, s.role, s.effect_class, s.repositories, s.allowed_paths,
+                        s.expires_at, s.nonce, s.issued_at, c.digest
+                 FROM campaign_stage_standing s
+                 LEFT JOIN campaign_stage_consumption c ON c.standing = s.digest
+                 WHERE s.digest=?1",
+                params![digest.to_hex()],
+                |r| standing_from_row(*digest, r),
+            )
+            .optional()
+            .map_err(backend)?
+            .map(|s| {
+                if s.recompute_digest() != s.digest() {
+                    return Err(StoreError::Corrupt(format!(
+                        "campaign standing {} fields do not recompute to their digest",
+                        s.digest()
+                    )));
+                }
+                Ok(s)
+            })
+            .transpose()
+    }
+
+    fn latest_campaign_standing(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Option<CampaignStageStanding>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT s.digest, s.proposal_digest, s.upstream_digest, s.campaign, s.stage,
+                        s.stage_class, s.role, s.effect_class, s.repositories, s.allowed_paths,
+                        s.expires_at, s.nonce, s.issued_at, c.digest
+                 FROM campaign_stage_standing s
+                 LEFT JOIN campaign_stage_consumption c ON c.standing = s.digest
+                 WHERE s.campaign=?1 AND s.stage=?2
+                 ORDER BY s.issued_at DESC, s.rowid DESC LIMIT 1",
+                params![campaign, stage],
+                |r| {
+                    let digest = parse_digest(&r.get::<_, String>(0)?).map_err(sql_corrupt)?;
+                    standing_from_row_shifted(digest, r)
+                },
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn record_campaign_consumption(
+        &mut self,
+        c: &CampaignStageConsumption,
+    ) -> Result<(), StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO campaign_stage_consumption
+                 (standing, digest, campaign, stage, role, consumed_at, effect_completed, receipt)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    c.standing.to_hex(),
+                    c.digest.to_hex(),
+                    c.campaign,
+                    c.stage,
+                    role_tag(c.role),
+                    c.consumed_at.0 as i64,
+                    c.effect_completed as i64,
+                    c.receipt.map(|r| r.to_hex())
+                ],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            let existing = self
+                .get_campaign_consumption(&c.standing)?
+                .ok_or_else(|| StoreError::Corrupt("campaign consumption vanished".into()))?;
+            if &existing != c {
+                return Err(StoreError::ImmutableRebind);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_campaign_consumption(
+        &mut self,
+        standing: &Sha256Digest,
+    ) -> Result<Option<CampaignStageConsumption>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT digest, campaign, stage, role, consumed_at, effect_completed, receipt
+                 FROM campaign_stage_consumption WHERE standing=?1",
+                params![standing.to_hex()],
+                |r| consumption_from_row_at(*standing, r, 0),
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn burn_campaign_standing(
+        &mut self,
+        standing: &CampaignStageStanding,
+        record: &CampaignStageConsumption,
+    ) -> Result<CampaignBurn, StoreError> {
+        // One immediate transaction: SQLite serializes writers, so the
+        // check-and-insert below is atomic across threads, processes, and
+        // service instances. Exactly one concurrent caller inserts the row.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(backend)?;
+        // Supersession, decided inside the transaction.
+        let latest: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT digest, issued_at FROM campaign_stage_standing
+                 WHERE campaign=?1 AND stage=?2
+                 ORDER BY issued_at DESC, rowid DESC LIMIT 1",
+                params![standing.campaign(), standing.stage()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        if let Some((digest, issued_at)) = latest {
+            if digest != standing.digest().to_hex() && issued_at as u64 > standing.issued_at().0 {
+                return Ok(CampaignBurn::Superseded);
+            }
+        }
+        // An existing burn is returned for exact classification, never
+        // overwritten and never a second success.
+        let existing = tx
+            .query_row(
+                "SELECT digest, campaign, stage, role, consumed_at, effect_completed, receipt
+                 FROM campaign_stage_consumption WHERE standing=?1",
+                params![standing.digest().to_hex()],
+                |r| consumption_from_row_at(standing.digest(), r, 0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if let Some(row) = existing {
+            return Ok(CampaignBurn::Existing(row));
+        }
+        tx.execute(
+            "INSERT INTO campaign_stage_consumption
+             (standing, digest, campaign, stage, role, consumed_at, effect_completed, receipt)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                record.standing.to_hex(),
+                record.digest.to_hex(),
+                record.campaign,
+                record.stage,
+                role_tag(record.role),
+                record.consumed_at.0 as i64,
+                record.effect_completed as i64,
+                record.receipt.map(|r| r.to_hex())
+            ],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok(CampaignBurn::Burned)
+    }
+
+    fn mark_campaign_effect_completed(
+        &mut self,
+        standing: &Sha256Digest,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE campaign_stage_consumption SET effect_completed=1 WHERE standing=?1",
+                params![standing.to_hex()],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn record_campaign_receipt(
+        &mut self,
+        standing: &Sha256Digest,
+        receipt: &Sha256Digest,
+    ) -> Result<(), StoreError> {
+        let existing: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT receipt FROM campaign_stage_consumption WHERE standing=?1",
+                params![standing.to_hex()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some(existing) = existing else {
+            return Err(StoreError::NotFound);
+        };
+        if let Some(h) = &existing {
+            if h != &receipt.to_hex() {
+                // A recorded receipt is immutable testimony about which
+                // consuming receipt this burn's effect produced.
+                return Err(StoreError::ImmutableRebind);
+            }
+        }
+        self.conn
+            .execute(
+                "UPDATE campaign_stage_consumption SET effect_completed=1, receipt=?2
+                 WHERE standing=?1",
+                params![standing.to_hex(), receipt.to_hex()],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn campaign_stage_receipts(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<Sha256Digest>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT receipt FROM campaign_stage_consumption
+                 WHERE campaign=?1 AND stage=?2 AND receipt IS NOT NULL ORDER BY consumed_at",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![campaign, stage], |r| {
+                parse_digest(&r.get::<_, String>(0)?).map_err(sql_corrupt)
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn record_campaign_adjudication(&mut self, a: &AdjudicationReceipt) -> Result<(), StoreError> {
+        let tx = self.tx()?;
+        let changed = tx
+            .execute(
+                "INSERT OR IGNORE INTO campaign_stage_adjudication
+                 (digest, campaign, stage, review_receipt, verdict, adjudicator, findings,
+                  residuals, adjudicated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    a.digest.to_hex(),
+                    a.campaign,
+                    a.stage,
+                    a.review_receipt.to_hex(),
+                    adjudication_verdict_tag(a.verdict),
+                    a.adjudicator,
+                    join_list(&a.findings),
+                    encode_residuals(&a.residuals),
+                    a.adjudicated_at.0 as i64
+                ],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            drop(tx);
+            let existing = self
+                .find_campaign_adjudication(&a.campaign, &a.stage, &a.review_receipt)?
+                .filter(|e| e.digest == a.digest)
+                .ok_or_else(|| StoreError::Corrupt("campaign adjudication vanished".into()))?;
+            if &existing != a {
+                return Err(StoreError::ImmutableRebind);
+            }
+            return Ok(());
+        }
+        for r in &a.residuals {
+            tx.execute(
+                "INSERT INTO campaign_residual_obligation
+                 (adjudication, campaign, stage, kind, statement, at)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    a.digest.to_hex(),
+                    a.campaign,
+                    a.stage,
+                    r.kind,
+                    r.statement,
+                    a.adjudicated_at.0 as i64
+                ],
+            )
+            .map_err(backend)?;
+        }
+        tx.commit().map_err(backend)
+    }
+
+    fn get_campaign_adjudications(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<AdjudicationReceipt>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT digest, campaign, stage, review_receipt, verdict, adjudicator, findings,
+                        residuals, adjudicated_at
+                 FROM campaign_stage_adjudication WHERE campaign=?1 AND stage=?2
+                 ORDER BY adjudicated_at, rowid",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![campaign, stage], adjudication_from_row)
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn find_campaign_adjudication(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+        review_receipt: &Sha256Digest,
+    ) -> Result<Option<AdjudicationReceipt>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT digest, campaign, stage, review_receipt, verdict, adjudicator, findings,
+                        residuals, adjudicated_at
+                 FROM campaign_stage_adjudication
+                 WHERE campaign=?1 AND stage=?2 AND review_receipt=?3
+                 ORDER BY adjudicated_at, rowid LIMIT 1",
+                params![campaign, stage, review_receipt.to_hex()],
+                adjudication_from_row,
+            )
+            .optional()
+            .map_err(backend)
+    }
+
+    fn get_campaign_adjudication(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<AdjudicationReceipt>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT digest, campaign, stage, review_receipt, verdict, adjudicator, findings,
+                        residuals, adjudicated_at
+                 FROM campaign_stage_adjudication WHERE digest=?1",
+                params![digest.to_hex()],
+                adjudication_from_row,
+            )
+            .optional()
+            .map_err(backend)?
+            .map(|a| {
+                if a.recompute_digest() != a.digest {
+                    return Err(StoreError::Corrupt(format!(
+                        "campaign adjudication {} fields do not recompute to their digest",
+                        a.digest
+                    )));
+                }
+                Ok(a)
+            })
+            .transpose()
+    }
+
+    fn find_campaign_consumptions_by_receipt(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+        receipt: &Sha256Digest,
+    ) -> Result<Vec<CampaignStageConsumption>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT standing, digest, campaign, stage, role, consumed_at, effect_completed,
+                        receipt
+                 FROM campaign_stage_consumption
+                 WHERE campaign=?1 AND stage=?2 AND receipt=?3
+                 ORDER BY consumed_at, rowid",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![campaign, stage, receipt.to_hex()], |r| {
+                let standing = parse_digest(&r.get::<_, String>(0)?).map_err(sql_corrupt)?;
+                consumption_from_row_at(standing, r, 1)
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn get_campaign_residuals(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<gwr_core::campaign::adjudication::ResidualStatement>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT kind, statement FROM campaign_residual_obligation
+                 WHERE campaign=?1 AND stage=?2 ORDER BY at, rowid",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![campaign, stage], |r| {
+                Ok(gwr_core::campaign::adjudication::ResidualStatement {
+                    kind: r.get(0)?,
+                    statement: r.get(1)?,
+                })
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
     }
 }

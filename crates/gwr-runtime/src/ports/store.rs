@@ -6,6 +6,10 @@
 //! increments the version. Normal operation reads projections; nothing replays a
 //! generic event stream. Historical records are never rewritten.
 
+use gwr_core::campaign::adjudication::{AdjudicationReceipt, ResidualStatement};
+use gwr_core::campaign::proposal::CampaignStageProposal;
+use gwr_core::campaign::standing::{CampaignStageConsumption, CampaignStageStanding};
+use gwr_core::digest::Sha256Digest;
 use gwr_core::domain::reservation::ReservationClaim;
 use gwr_core::domain::standing::{StandingGrant, StandingUse};
 use gwr_core::ids::*;
@@ -302,4 +306,121 @@ pub trait Store {
         &mut self,
         attempt: AttemptId,
     ) -> Result<Option<Reconciliation>, StoreError>;
+
+    // Campaign-stage standing (S-2). A distinct ledger from effect standing:
+    // content-addressed proposals and standings, one durable consumption per
+    // standing, adjudication receipts, and preserved residual obligations.
+    fn record_campaign_proposal(&mut self, p: &CampaignStageProposal) -> Result<(), StoreError>;
+    fn get_campaign_proposal(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<CampaignStageProposal>, StoreError>;
+    /// All proposals recorded for a campaign stage, oldest first.
+    fn find_campaign_proposals(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<CampaignStageProposal>, StoreError>;
+    fn record_campaign_standing(&mut self, s: &CampaignStageStanding) -> Result<(), StoreError>;
+    fn get_campaign_standing(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<CampaignStageStanding>, StoreError>;
+    /// The most recently issued standing for a campaign stage, for the
+    /// supersession law.
+    fn latest_campaign_standing(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Option<CampaignStageStanding>, StoreError>;
+    /// The durable burn. One per standing, recorded before the effect runs.
+    fn record_campaign_consumption(
+        &mut self,
+        c: &CampaignStageConsumption,
+    ) -> Result<(), StoreError>;
+    /// Atomically burn campaign standing: inside one immediate transaction,
+    /// verify the presented standing is not superseded and no burn exists,
+    /// then insert the one consumption row. Exactly one concurrent caller —
+    /// across threads, processes, and service instances — receives
+    /// `CampaignBurn::Burned`; every other caller receives the exact durable
+    /// state, never a second success.
+    fn burn_campaign_standing(
+        &mut self,
+        standing: &CampaignStageStanding,
+        record: &CampaignStageConsumption,
+    ) -> Result<CampaignBurn, StoreError>;
+    fn get_campaign_consumption(
+        &mut self,
+        standing: &Sha256Digest,
+    ) -> Result<Option<CampaignStageConsumption>, StoreError>;
+    /// Mark the effect of a consumed standing completed, receipt not yet
+    /// known. No-op if already marked.
+    fn mark_campaign_effect_completed(&mut self, standing: &Sha256Digest)
+        -> Result<(), StoreError>;
+    /// Record the consuming receipt's digest, verbatim. Implies completion.
+    fn record_campaign_receipt(
+        &mut self,
+        standing: &Sha256Digest,
+        receipt: &Sha256Digest,
+    ) -> Result<(), StoreError>;
+    /// Receipt digests recorded for a campaign stage's consumptions.
+    fn campaign_stage_receipts(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<Sha256Digest>, StoreError>;
+    /// Record an adjudication receipt and its residual obligations. The
+    /// residuals are preserved; there is no discharge.
+    fn record_campaign_adjudication(&mut self, a: &AdjudicationReceipt) -> Result<(), StoreError>;
+    fn get_campaign_adjudications(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<AdjudicationReceipt>, StoreError>;
+    /// The adjudication covering one review receipt for a stage, if any.
+    fn find_campaign_adjudication(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+        review_receipt: &Sha256Digest,
+    ) -> Result<Option<AdjudicationReceipt>, StoreError>;
+    /// The adjudication receipt with this exact digest, if recorded. Repair
+    /// admission cites adjudications by exact identity — never by stage name
+    /// or receipt alone.
+    fn get_campaign_adjudication(
+        &mut self,
+        digest: &Sha256Digest,
+    ) -> Result<Option<AdjudicationReceipt>, StoreError>;
+    /// Every consumption row for a campaign stage carrying this exact
+    /// receipt digest. The repair authority chain resolves the consumed
+    /// original standing through the adjudicated review receipt.
+    fn find_campaign_consumptions_by_receipt(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+        receipt: &Sha256Digest,
+    ) -> Result<Vec<CampaignStageConsumption>, StoreError>;
+    /// Every residual obligation recorded for a campaign stage, preserved
+    /// across adjudications, oldest first.
+    fn get_campaign_residuals(
+        &mut self,
+        campaign: &str,
+        stage: &str,
+    ) -> Result<Vec<ResidualStatement>, StoreError>;
+}
+
+/// The outcome of an atomic campaign-standing burn attempt. Exactly one
+/// concurrent caller receives `Burned`; every other outcome is an exact
+/// durable state, never a second success.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CampaignBurn {
+    /// This caller's burn is the durable one.
+    Burned,
+    /// A newer standing exists for the campaign stage; the presented one is
+    /// historical.
+    Superseded,
+    /// A burn already exists for this standing. The exact durable row is
+    /// returned so the service can classify it (replay, ambiguous outcome,
+    /// or duplicate effect) — never a second success.
+    Existing(CampaignStageConsumption),
 }

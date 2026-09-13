@@ -8,6 +8,7 @@ license.workspace = true
 gwr-core = { path = "../gwr-core" }
 gwr-runtime = { path = "../gwr-runtime" }
 hmac = "0.12"
+libc = "0.2"
 # Wire-format adapters only: Ed25519 verification of upstream authorization
 # issuances (ring), and strict decoding of the upstream wire records (serde).
 # The store substrate stays serde-free and length-prefixed as before.

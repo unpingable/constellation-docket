@@ -122,6 +122,7 @@ dependencies = [
  "gwr-core",
  "gwr-runtime",
  "hmac",
+ "libc",
  "ring",
  "rusqlite",
  "serde",
@@ -134,6 +135,9 @@ name = "gwr-runtime"
 version = "0.1.0"
 dependencies = [
  "gwr-core",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -41,6 +41,7 @@ fn root_help_exposes_bootstrap_workflow_and_runtime_dependencies() {
         "repository register",
         "repository relocate",
         "continuity subject",
+        "governed-loop inspect",
         "prepare start",
         "dispatch",
         "show (--attempt <id> | --dispatch <id>) [--json]",

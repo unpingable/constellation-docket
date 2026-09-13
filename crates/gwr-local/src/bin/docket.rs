@@ -4,6 +4,10 @@
 //! holds authority of its own. State lives under `--state <dir>`:
 //! `state.sqlite`, `artifacts/`, `journals/`, `provenance/`, `standing.key`.
 
+use gwr_core::campaign::adjudication::{AdjudicationVerdict, ResidualStatement};
+use gwr_core::campaign::proposal::{CampaignStageProposal, RepairBasis, RepoPin, StageBasis};
+use gwr_core::campaign::standing::{classify, ConsumptionState, ExecutionContext};
+use gwr_core::campaign::{RepairScopeClass, ReviewRequirement, StageClass, WorkerRole};
 use gwr_core::digest::Sha256Digest;
 use gwr_core::domain::evidence::Claim;
 use gwr_core::domain::standing::{StandingAct, StandingGrant, StandingScope};
@@ -17,7 +21,10 @@ use gwr_core::repository::{RepositoryAlias, RepositoryAliasKind, RepositoryRegis
 use gwr_core::work_request::{ClockReading, CommitHash, RefName, RepositoryLocator, WorkRequest};
 use gwr_local::adapters::{FsArtifactStore, FsProvenanceSink, HashChainIds, SystemClock};
 use gwr_local::broker::SubprocessGitBroker;
+use gwr_local::campaign_export;
 use gwr_local::capabilities::StandingTokenCodec;
+use gwr_local::governed_loop;
+use gwr_local::local_execution_standing::{self, GrantInput};
 use gwr_local::providers::fake::{Script, ScriptedProvider};
 use gwr_local::store::SqliteStore;
 use gwr_runtime::ports::adapters::{Clock, IdSource};
@@ -25,6 +32,7 @@ use gwr_runtime::ports::labor_provider::BoundedAssignment;
 use gwr_runtime::ports::store::Store;
 use gwr_runtime::services::authz_request;
 use gwr_runtime::services::authz_standing;
+use gwr_runtime::services::campaign as campaign_svc;
 use gwr_runtime::services::dispatch::{dispatch, DispatchOutcome};
 use gwr_runtime::services::dossier;
 use gwr_runtime::services::journal;
@@ -34,7 +42,13 @@ use gwr_runtime::services::ratification::ratify;
 use gwr_runtime::services::reconcile::reconcile;
 use gwr_runtime::services::reliance::{rely_review_queue, RelyError};
 use gwr_runtime::services::reservation::reserve;
+use std::io::Read as _;
 use std::path::PathBuf;
+
+/// Verifier-generation identity emitted into repair-authority artifacts:
+/// adapter name and crate version. File-level metadata, not part of the
+/// typed content address.
+const VERIFIER_ID: &str = concat!("gwr-local ", env!("CARGO_PKG_VERSION"));
 
 const ROOT_HELP: &str = "\
 Docket governed-work runtime
@@ -55,6 +69,8 @@ Repository identity:
   repository show             Inspect a registration [--json]
   repository migrate-attempt  Explicitly bind one legacy work request
   continuity subject          Export the exact Docket-owned subject [--json]
+  governed-loop inspect       Read one exact governed-loop issuance record
+  governed-loop standing-grant | standing-revoke | standing-supersede
 
 Governed workflow:
   request create
@@ -66,9 +82,20 @@ Governed workflow:
 
 Authorization and evidence:
   authz request | authz accept
+  governed-loop accept | reconcile-issuance | reconcile-attempt
   list [--json]
   show (--attempt <id> | --dispatch <id>) [--json]
   journal (--attempt <id> | --dispatch <id>) [--json]
+
+Campaign-stage standing (S-2; a distinct domain from effect standing):
+  campaign propose-stage    Record an exact stage proposal; prints its digest
+  campaign admit            Issue standing for a recorded proposal
+  campaign consume          Burn standing before the stage's effect runs
+  campaign outcome          Record effect completion / the consuming receipt
+  campaign adjudicate       Record a verdict (continue|exact-repair|refuse)
+  campaign export-repair-authority   Emit the exact repair-authority artifact (read-only)
+  campaign verify-repair-authority   Verify a repair-authority artifact (read-only)
+  campaign show             Inspect proposals, standing, adjudications
 
 Preparation providers:
   --provider fake  requires --fake-patch <file>
@@ -197,6 +224,48 @@ fn actor_id(name: &str) -> ActorId {
     ActorId::from_bytes(b)
 }
 
+/// All values of a repeated flag, in order.
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, a)| *a == name)
+        .filter_map(|(i, _)| args.get(i + 1).cloned())
+        .collect()
+}
+
+/// A repository pin as `locator:commit:tree`. Commit and tree are object ids
+/// (no colons), so splitting from the right is unambiguous.
+fn parse_pin(raw: &str) -> Result<RepoPin, String> {
+    let (head, tree) = raw
+        .rsplit_once(':')
+        .ok_or("pin must be locator:commit:tree")?;
+    let (locator, commit) = head
+        .rsplit_once(':')
+        .ok_or("pin must be locator:commit:tree")?;
+    Ok(RepoPin {
+        repository: RepositoryLocator::new(locator),
+        commit: CommitHash::new(commit),
+        tree: tree.to_string(),
+    })
+}
+
+fn parse_review_requirement_flag(args: &[String], name: &str) -> Result<ReviewRequirement, String> {
+    match flag(args, name).as_deref() {
+        None | Some("not-required") => Ok(ReviewRequirement::NotRequired),
+        Some("required") => Ok(ReviewRequirement::Required),
+        Some(other) => Err(format!("unknown review requirement {other:?}")),
+    }
+}
+
+fn consumption_state_tag(state: ConsumptionState) -> &'static str {
+    match state {
+        ConsumptionState::EffectNotBegun => "effect_not_begun",
+        ConsumptionState::ConsumedOutcomeUnresolved => "consumed_outcome_unresolved",
+        ConsumptionState::EffectCompletedReceiptMissing => "effect_completed_receipt_missing",
+        ConsumptionState::EffectCompletedReceipted => "effect_completed_receipted",
+    }
+}
+
 struct State {
     dir: PathBuf,
     store: SqliteStore,
@@ -303,6 +372,124 @@ fn run(args: &[String]) -> Result<(), String> {
         .map(String::as_str)
         .collect();
     match cmd.as_slice() {
+        ["governed-loop", "accept"] => {
+            // The exact signed issuance arrives on stdin. Docket resolves its
+            // own execution standing now, commits custody/attempt identity,
+            // and only then delegates mechanics to the named executor.
+            let st = State::open(args)?;
+            let envelope = read_stdin_bounded()?;
+            let trust = std::fs::read(need(args, "--trust")?)
+                .map_err(|error| format!("reading governed-loop trust: {error}"))?;
+            let local = has(args, "--require-local-standing-snapshot");
+            let call = if local { governed_loop::accept_local } else { governed_loop::accept };
+            let custody = call(
+                &st.dir.join("state.sqlite"),
+                &envelope,
+                &trust,
+                &PathBuf::from(need(args, "--standing-resolver")?),
+                &PathBuf::from(need(args, "--executor")?),
+                &PathBuf::from(need(args, "--executor-config")?),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&custody)
+                    .map_err(|error| format!("governed custody response: {error}"))?
+            );
+            Ok(())
+        }
+        ["governed-loop", "standing-grant"] => {
+            let st=State::open(args)?;
+            let issued:u64=need(args,"--issued-at-unix-ms")?.parse().map_err(|_|"invalid issued time".to_owned())?;
+            let expires:u64=need(args,"--expires-at-unix-ms")?.parse().map_err(|_|"invalid expiry".to_owned())?;
+            let id=local_execution_standing::grant(&st.dir.join("state.sqlite"),&GrantInput{
+                operator:&need(args,"--operator")?, campaign:&need(args,"--campaign")?,
+                occurrence:&need(args,"--occurrence")?, program:&need(args,"--program")?,
+                work_schema:&need(args,"--work-schema")?, work:&need(args,"--work")?,
+                subject:&need(args,"--subject")?, scope:&need(args,"--scope")?,
+                issued_at_unix_ms:issued, expires_at_unix_ms:expires,
+            })?;
+            println!("execution_standing: {id}"); Ok(())
+        }
+        ["governed-loop", action @ ("standing-revoke" | "standing-supersede")] => {
+            let st=State::open(args)?;
+            let at:u64=need(args,"--at-unix-ms")?.parse().map_err(|_|"invalid transition time".to_owned())?;
+            let status=if *action=="standing-revoke"{"revoked"}else{"superseded"};
+            let revision=local_execution_standing::transition(&st.dir.join("state.sqlite"),&need(args,"--execution-standing")?,status,at)?;
+            println!("revision: {revision}"); Ok(())
+        }
+        ["governed-loop", "standing-snapshot"] => {
+            let state=PathBuf::from(need(args,"--state")?);
+            let snapshot=governed_loop::inspect_local_snapshot(&state.join("state.sqlite"),&need(args,"--issuance")?)?;
+            println!("{}",serde_json::to_string(&snapshot).map_err(|e|format!("local-standing-snapshot-json:{e}"))?);
+            Ok(())
+        }
+        ["governed-loop", "standing-write-launcher"] => {
+            local_execution_standing::write_zero_arg_launcher(
+                &PathBuf::from(need(args,"--resolver")?),
+                &PathBuf::from(need(args,"--config")?),
+                &PathBuf::from(need(args,"--python-interpreter")?),
+                &PathBuf::from(need(args,"--output")?),
+            )?;
+            Ok(())
+        }
+        ["governed-loop", "reconcile-issuance"] => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Request {
+                issuance: String,
+            }
+            let st = State::open(args)?;
+            let request: Request = serde_json::from_slice(&read_stdin_bounded()?)
+                .map_err(|error| format!("governed reconciliation request: {error}"))?;
+            let response = governed_loop::reconcile(
+                &st.dir.join("state.sqlite"),
+                &request.issuance,
+                None,
+                &PathBuf::from(need(args, "--executor")?),
+                &PathBuf::from(need(args, "--executor-config")?),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&response)
+                    .map_err(|error| format!("governed reconciliation response: {error}"))?
+            );
+            Ok(())
+        }
+        ["governed-loop", "reconcile-attempt"] => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Request {
+                issuance: String,
+                attempt: String,
+            }
+            let st = State::open(args)?;
+            let request: Request = serde_json::from_slice(&read_stdin_bounded()?)
+                .map_err(|error| format!("governed reconciliation request: {error}"))?;
+            let response = governed_loop::reconcile(
+                &st.dir.join("state.sqlite"),
+                &request.issuance,
+                Some(&request.attempt),
+                &PathBuf::from(need(args, "--executor")?),
+                &PathBuf::from(need(args, "--executor-config")?),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&response)
+                    .map_err(|error| format!("governed reconciliation response: {error}"))?
+            );
+            Ok(())
+        }
+        ["governed-loop", "inspect"] => {
+            let state = PathBuf::from(need(args, "--state")?);
+            let issuance = need(args, "--issuance")?;
+            let response = governed_loop::inspect(&state.join("state.sqlite"), &issuance)?;
+            println!(
+                "{}",
+                serde_json::to_string(&response)
+                    .map_err(|error| format!("governed inspection response: {error}"))?
+            );
+            Ok(())
+        }
         ["repository", "register"] => {
             let mut st = State::open(args)?;
             let path = require_absolute_path(&need(args, "--repo")?)?;
@@ -954,6 +1141,322 @@ fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        ["campaign", "propose-stage"] => {
+            // Record an exact stage proposal. The stage class fixes the role
+            // and effect class; the never-admitted classes refuse here, by
+            // name, before anything is created.
+            let mut st = State::open(args)?;
+            let class =
+                StageClass::admit_tag(&need(args, "--class")?).map_err(|e| format!("{e:?}"))?;
+            let now = st.clock.now();
+            let ttl: u64 = flag(args, "--ttl-ms")
+                .map(|s| s.parse().unwrap_or(3_600_000))
+                .unwrap_or(3_600_000);
+            let basis = match (flag(args, "--basis-root"), flag(args, "--basis-stage")) {
+                (Some(identity), None) => StageBasis::RootAuthorization { identity },
+                (None, Some(stage)) => StageBasis::PredecessorStage {
+                    stage,
+                    adjudication_digest: parse_digest(&need(args, "--basis-adjudication")?)?,
+                },
+                _ => {
+                    return Err("give exactly one of --basis-root or --basis-stage with \
+                         --basis-adjudication"
+                        .into())
+                }
+            };
+            let pins = flags(args, "--pin")
+                .iter()
+                .map(|p| parse_pin(p))
+                .collect::<Result<Vec<_>, _>>()?;
+            let repair = if class.is_repair() {
+                Some(RepairBasis {
+                    original_stage: need(args, "--repair-original-stage")?,
+                    rejected_review_receipt: parse_digest(&need(args, "--repair-receipt")?)?,
+                    finding_ids: flags(args, "--repair-finding"),
+                    scope_class: RepairScopeClass::from_tag(&need(args, "--repair-scope")?)
+                        .ok_or("unknown repair scope class")?,
+                    nonclaims: flags(args, "--repair-nonclaim"),
+                    review_requirement: parse_review_requirement_flag(args, "--repair-review")?,
+                })
+            } else {
+                None
+            };
+            let proposal = CampaignStageProposal::propose(
+                need(args, "--upstream-digest")?,
+                need(args, "--campaign")?,
+                need(args, "--stage")?,
+                class,
+                class.required_role(),
+                class.required_effect_class(),
+                basis,
+                pins,
+                flags(args, "--allow"),
+                need(args, "--evidence-contract")?,
+                need(args, "--handoff-schema")?,
+                ClockReading(now.0 + ttl),
+                need(args, "--nonce")?,
+                flag(args, "--worktree").unwrap_or_default(),
+                parse_review_requirement_flag(args, "--review")?,
+                flags(args, "--nonclaim"),
+                repair,
+                now,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            let digest = campaign_svc::propose_stage(&mut st.store, &proposal)
+                .map_err(|e| format!("{e:?}"))?;
+            println!("proposal: {}", digest.to_hex());
+            println!("note: recording a proposal creates no standing; `campaign admit` does");
+            Ok(())
+        }
+        ["campaign", "admit"] => {
+            let mut st = State::open(args)?;
+            let digest = parse_digest(&need(args, "--proposal")?)?;
+            let standing = campaign_svc::admit(&mut st.store, &digest, st.clock.now())
+                .map_err(|e| format!("{e:?}"))?;
+            println!("standing: {}", standing.digest().to_hex());
+            println!("role: {}", standing.role().tag());
+            println!("effect_class: {}", standing.effect_class().tag());
+            Ok(())
+        }
+        ["campaign", "consume"] => {
+            // Burn-before-effect: the consumption is durable before the
+            // caller runs any effect. A second consumption hits the
+            // crash-recovery classification and refuses.
+            let mut st = State::open(args)?;
+            let standing = parse_digest(&need(args, "--standing")?)?;
+            let role = WorkerRole::from_tag(&need(args, "--role")?)
+                .ok_or("unknown role; use operator, reviewer, or repair")?;
+            let context = ExecutionContext {
+                campaign: need(args, "--campaign")?,
+                stage: need(args, "--stage")?,
+                role,
+                proposal_digest: parse_digest(&need(args, "--proposal")?)?,
+            };
+            let record = campaign_svc::consume(&mut st.store, &standing, &context, st.clock.now())
+                .map_err(|e| format!("{e:?}"))?;
+            println!("consumption: {}", record.digest.to_hex());
+            println!("note: the burn is durable; the stage's effect may now run exactly once");
+            Ok(())
+        }
+        ["campaign", "outcome"] => {
+            let mut st = State::open(args)?;
+            let standing = parse_digest(&need(args, "--standing")?)?;
+            match flag(args, "--receipt") {
+                Some(r) => {
+                    let receipt = parse_digest(&r)?;
+                    campaign_svc::record_receipt(&mut st.store, &standing, &receipt)
+                        .map_err(|e| format!("{e:?}"))?;
+                    println!("outcome: effect_completed_receipted");
+                    println!("receipt: {}", receipt.to_hex());
+                }
+                None => {
+                    campaign_svc::record_effect_completed(&mut st.store, &standing)
+                        .map_err(|e| format!("{e:?}"))?;
+                    println!("outcome: effect_completed_receipt_missing");
+                    println!("note: ambiguous states refuse re-execution; never guess and re-run");
+                }
+            }
+            Ok(())
+        }
+        ["campaign", "adjudicate"] => {
+            let mut st = State::open(args)?;
+            let verdict = match need(args, "--verdict")?.as_str() {
+                "continue" => AdjudicationVerdict::Continue,
+                "exact-repair" => AdjudicationVerdict::ExactRepair,
+                "refuse" => AdjudicationVerdict::Refuse,
+                other => {
+                    return Err(format!(
+                        "unknown verdict {other:?}; use continue, exact-repair, or refuse"
+                    ))
+                }
+            };
+            let residuals = flags(args, "--residual")
+                .iter()
+                .map(|r| {
+                    let (kind, statement) =
+                        r.split_once('=').ok_or("residual must be kind=statement")?;
+                    Ok(ResidualStatement {
+                        kind: kind.to_string(),
+                        statement: statement.to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, &str>>()?;
+            let receipt = campaign_svc::adjudicate(
+                &mut st.store,
+                &need(args, "--campaign")?,
+                &need(args, "--stage")?,
+                &parse_digest(&need(args, "--review-receipt")?)?,
+                verdict,
+                &need(args, "--adjudicator")?,
+                flags(args, "--finding"),
+                residuals,
+                st.clock.now(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            println!("adjudication: {}", receipt.digest.to_hex());
+            println!("verdict: {}", receipt.verdict.tag());
+            for r in &receipt.residuals {
+                println!("residual_obligation: {}: {}", r.kind, r.statement);
+            }
+            Ok(())
+        }
+        ["campaign", "export-repair-authority"] => {
+            // Read-only P1 export: the exact Docket authority for one repair
+            // stage's execution, as canonical JSON. No campaign state is
+            // created or altered; the law (chain, supersession, expiry,
+            // subset) is re-verified at export time.
+            let mut st = State::open(args)?;
+            let standing = parse_digest(&need(args, "--standing")?)?;
+            let bundle = campaign_svc::export_repair_authority(
+                &mut st.store,
+                &standing,
+                st.clock.now(),
+                VERIFIER_ID,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            let json = campaign_export::render(&bundle);
+            match flag(args, "--out") {
+                Some(path) => {
+                    std::fs::write(&path, &json).map_err(|e| e.to_string())?;
+                    let file_digest = campaign_export::sha256_hex(json.as_bytes());
+                    std::fs::write(format!("{path}.sha256"), format!("{file_digest}\n"))
+                        .map_err(|e| e.to_string())?;
+                    println!("repair_authority_file: {path}");
+                    println!("file_sha256: {file_digest}");
+                }
+                None => print!("{json}"),
+            }
+            println!("repair_authority: {}", bundle.digest.to_hex());
+            println!("note: read-only export; no campaign state was created or altered");
+            Ok(())
+        }
+        ["campaign", "verify-repair-authority"] => {
+            // Read-only P1 verification: the artifact must parse, its typed
+            // digest must recompute, and it must equal — field for field,
+            // including exact burn state — the authority Docket re-derives
+            // now. A stale, substituted, corrupted, or foreign artifact
+            // refuses. No campaign state is created or altered.
+            let mut st = State::open(args)?;
+            let raw =
+                std::fs::read_to_string(need(args, "--bundle")?).map_err(|e| e.to_string())?;
+            let bundle = campaign_export::parse(&raw)?;
+            if let Some(expect) = flag(args, "--expect-standing") {
+                let expect = parse_digest(&expect)?;
+                if bundle.standing != expect {
+                    return Err(format!(
+                        "Refusal(RepairAuthorityMismatch {{ field: \"standing\" }}): \
+                         expected {expect}, artifact binds {}",
+                        bundle.standing.to_hex()
+                    ));
+                }
+            }
+            campaign_svc::verify_repair_authority(
+                &mut st.store,
+                &bundle,
+                st.clock.now(),
+                VERIFIER_ID,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            println!("verification: ok");
+            println!("repair_authority: {}", bundle.digest.to_hex());
+            println!("standing: {}", bundle.standing.to_hex());
+            println!("adjudication: {}", bundle.adjudication.to_hex());
+            Ok(())
+        }
+        ["campaign", "show"] => {
+            // Read-only: no proposal, standing, consumption, or adjudication
+            // is created or altered by this verb.
+            let mut st = State::open(args)?;
+            if let Some(p) = flag(args, "--proposal") {
+                let digest = parse_digest(&p)?;
+                let proposal = st
+                    .store
+                    .get_campaign_proposal(&digest)
+                    .map_err(|e| format!("{e:?}"))?
+                    .ok_or_else(|| format!("unknown proposal {p}"))?;
+                println!("proposal: {}", proposal.digest.to_hex());
+                println!("upstream_digest: {}", proposal.upstream_digest);
+                println!("campaign: {}", proposal.campaign);
+                println!("stage: {}", proposal.stage);
+                println!("stage_class: {}", proposal.stage_class.tag());
+                println!("role: {}", proposal.role.tag());
+                println!("effect_class: {}", proposal.effect_class.tag());
+                println!("expires_at_ms: {}", proposal.expires_at.0);
+                println!("nonce: {}", proposal.nonce);
+                for pin in &proposal.repositories {
+                    println!(
+                        "repository: {} commit={} tree={}",
+                        pin.repository.as_str(),
+                        pin.commit.as_str(),
+                        pin.tree
+                    );
+                }
+                for path in &proposal.allowed_paths {
+                    println!("allowed_path: {path}");
+                }
+                for nonclaim in &proposal.nonclaims {
+                    println!("nonclaim: {nonclaim}");
+                }
+            } else if let Some(s) = flag(args, "--standing") {
+                let digest = parse_digest(&s)?;
+                let standing = st
+                    .store
+                    .get_campaign_standing(&digest)
+                    .map_err(|e| format!("{e:?}"))?
+                    .ok_or_else(|| format!("unknown standing {s}"))?;
+                println!("standing: {}", standing.digest().to_hex());
+                println!("proposal: {}", standing.proposal_digest().to_hex());
+                println!("upstream_digest: {}", standing.upstream_digest());
+                println!("campaign: {}", standing.campaign());
+                println!("stage: {}", standing.stage());
+                println!("stage_class: {}", standing.stage_class().tag());
+                println!("role: {}", standing.role().tag());
+                println!("effect_class: {}", standing.effect_class().tag());
+                println!("expires_at_ms: {}", standing.expires_at().0);
+                println!("nonce: {}", standing.nonce());
+                let consumption = st
+                    .store
+                    .get_campaign_consumption(&standing.digest())
+                    .map_err(|e| format!("{e:?}"))?;
+                println!(
+                    "consumption_state: {}",
+                    consumption_state_tag(classify(consumption.as_ref()))
+                );
+                if let Some(c) = &consumption {
+                    println!("consumption: {}", c.digest.to_hex());
+                    if let Some(r) = &c.receipt {
+                        println!("receipt: {}", r.to_hex());
+                    }
+                }
+            } else if has(args, "--adjudications") {
+                let campaign = need(args, "--campaign")?;
+                let stage = need(args, "--stage")?;
+                for a in st
+                    .store
+                    .get_campaign_adjudications(&campaign, &stage)
+                    .map_err(|e| format!("{e:?}"))?
+                {
+                    println!("adjudication: {}", a.digest.to_hex());
+                    println!("verdict: {}", a.verdict.tag());
+                    println!("review_receipt: {}", a.review_receipt.to_hex());
+                    for f in &a.findings {
+                        println!("finding: {f}");
+                    }
+                }
+                for r in st
+                    .store
+                    .get_campaign_residuals(&campaign, &stage)
+                    .map_err(|e| format!("{e:?}"))?
+                {
+                    println!("residual_obligation: {}: {}", r.kind, r.statement);
+                }
+            } else {
+                return Err("give --proposal <digest>, --standing <digest>, or \
+                     --adjudications with --campaign and --stage"
+                    .into());
+            }
+            Ok(())
+        }
         ["docket", "list"] | ["list"] => {
             let mut st = State::open(args)?;
             // One canonical list model sources both renderings; the human
@@ -1087,7 +1590,24 @@ fn run(args: &[String]) -> Result<(), String> {
              prepare start, prepare poll, \
              candidate admit, grant standing, ratify, reserve, dispatch, observe, \
              rely review-queue, reconcile, recover fact, recover resolve, authz request, \
-             authz accept, docket list, docket show, docket journal, continuity subject"
+             authz accept, governed-loop accept, governed-loop reconcile-issuance, \
+             governed-loop reconcile-attempt, governed-loop inspect, docket list, docket show, docket journal, continuity subject, \
+             campaign propose-stage, campaign admit, campaign consume, campaign outcome, \
+             campaign adjudicate, campaign export-repair-authority, \
+             campaign verify-repair-authority, campaign show"
         )),
     }
+}
+
+fn read_stdin_bounded() -> Result<Vec<u8>, String> {
+    const LIMIT: u64 = 1_048_576;
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("reading governed-loop stdin: {error}"))?;
+    if bytes.is_empty() || bytes.len() as u64 > LIMIT {
+        return Err("governed-loop stdin is empty or exceeds 1 MiB".to_owned());
+    }
+    Ok(bytes)
 }
