@@ -158,6 +158,23 @@ pub fn grant(database: &Path, input: &GrantInput<'_>) -> Result<String, String> 
         .transaction()
         .map_err(|e| format!("local-standing-transaction:{e}"))?;
     tx.execute(
+        "INSERT OR IGNORE INTO local_execution_standing_deployment
+         (singleton,mode,operator,max_lifetime_ms) VALUES (1,'snapshot_currentness',?1,300000)",
+        [input.operator],
+    )
+    .map_err(|e| format!("local-standing-enrollment:{e}"))?;
+    let enrolled: String = tx
+        .query_row(
+            "SELECT operator FROM local_execution_standing_deployment WHERE singleton=1
+         AND mode='snapshot_currentness' AND max_lifetime_ms=300000",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("local-standing-enrollment-read:{e}"))?;
+    if enrolled != input.operator {
+        return Err("local-standing-operator-enrollment-mismatch".to_owned());
+    }
+    tx.execute(
         "INSERT INTO local_execution_standing_grant VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             id,
@@ -233,6 +250,10 @@ pub fn resolve(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|e| format!("local-standing-read-open:{e}"))?;
+    let enrolled:String=db.query_row("SELECT operator FROM local_execution_standing_deployment WHERE singleton=1 AND mode='snapshot_currentness' AND max_lifetime_ms=300000",[],|r|r.get(0)).map_err(|e|format!("local-standing-enrollment-read:{e}"))?;
+    if enrolled != operator {
+        return Err("local-standing-operator-enrollment-mismatch".to_owned());
+    }
     let mut statement=db.prepare("SELECT g.execution_standing,p.revision,r.status,g.issued_at,g.expires_at,r.currentness FROM local_execution_standing_grant g JOIN local_execution_standing_projection p USING(execution_standing) JOIN local_execution_standing_revision r USING(execution_standing,revision) WHERE g.operator=?1 AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4 AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8 LIMIT 2").map_err(|e|format!("local-standing-query-prepare:{e}"))?;
     let mut rows = statement
         .query(params![

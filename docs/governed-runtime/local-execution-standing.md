@@ -16,9 +16,12 @@ grant identity and a monotonic `--at-unix-ms`. Deployment tooling generates a
 measured zero-argument launcher with `standing-write-launcher`; both the
 resolver and its closed static config are verified before each invocation.
 
-The local profile must invoke `governed-loop accept` with
-`--require-local-standing-snapshot`. This is a deployment-wide enrolled choice,
-not a caller-controlled fallback. Docket requires the exact immutable revision
+The first prospective grant irreversibly enrolls that Docket state database in
+local snapshot-currentness mode and fixes its operator identity and 300-second
+maximum. Every later accept against that state requires local backing even when
+the caller omits `--require-local-standing-snapshot`; the flag only asserts the
+expected mode on a not-yet-enrolled database and cannot select weaker behavior.
+Docket requires the exact immutable revision
 named by the resolver's hashes and stores its permission identity, revision,
 resolution time, expiry, currentness and resolution atomically with custody.
 `governed-loop standing-snapshot --issuance DIGEST` reads that explicit backing

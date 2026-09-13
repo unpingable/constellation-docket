@@ -273,9 +273,17 @@ impl SqliteGovernedCustodyStoreV1 {
             .pragma_update(None, "busy_timeout", 5_000_u32)
             .map_err(|error| format!("governed-custody-busy-timeout:{error}"))?;
         crate::local_execution_standing::migrate(&connection)?;
+        let enrolled: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_execution_standing_deployment
+                 WHERE singleton=1 AND mode='snapshot_currentness' AND max_lifetime_ms=300000)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("local-standing-enrollment-read:{error}"))?;
         Ok(Self {
             connection,
-            require_local_snapshot,
+            require_local_snapshot: require_local_snapshot || enrolled,
         })
     }
 
@@ -1463,7 +1471,10 @@ mod tests {
             gwr_runtime::governed_loop::make_custody(&fixture.issuance, &standing, 1100).unwrap();
         let (envelope, issuance) =
             verify_signed_issuance(&fixture.envelope, &fixture.trust).unwrap();
-        let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database, true).unwrap();
+        // The grant permanently enrolled local mode. Ordinary accept/open can
+        // no longer downgrade it by omitting the assertion flag.
+        let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database, false).unwrap();
+        assert!(store.require_local_snapshot);
         store
             .insert_custody(
                 &envelope,

@@ -1,5 +1,12 @@
 -- Prospective, operator-owned Docket execution standing. Revision rows are
 -- immutable observations; the projection selects the latest operator state.
+CREATE TABLE IF NOT EXISTS local_execution_standing_deployment (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  mode TEXT NOT NULL CHECK(mode = 'snapshot_currentness'),
+  operator TEXT NOT NULL,
+  max_lifetime_ms INTEGER NOT NULL CHECK(max_lifetime_ms = 300000)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS local_execution_standing_grant (
   execution_standing TEXT PRIMARY KEY,
   operator TEXT NOT NULL,
