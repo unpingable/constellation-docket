@@ -8,7 +8,10 @@ use gwr_runtime::ports::adapters::{ArtifactStore, Clock, IdSource, ProvenanceSin
 use gwr_runtime::ports::labor_provider::ProvenanceEntry;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static NEXT_ID_SOURCE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct SystemClock;
 
@@ -43,9 +46,11 @@ impl HashChainIds {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before epoch")
             .as_nanos();
-        let seed = gwr_core::digest::Transcript::new("gwr:id-seed:v1")
+        let instance = NEXT_ID_SOURCE_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let seed = gwr_core::digest::Transcript::new("gwr:id-seed:v2")
             .text_field("nanos", &nanos.to_string())
             .text_field("pid", &std::process::id().to_string())
+            .text_field("instance", &instance.to_string())
             .finalize();
         Self {
             seed: *seed.as_bytes(),
@@ -141,5 +146,33 @@ impl ProvenanceSink for FsProvenanceSink {
             .map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn concurrent_id_sources_have_distinct_first_identities() {
+        const THREADS: usize = 64;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    HashChainIds::new().fresh16()
+                })
+            })
+            .collect();
+        let identities: HashSet<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(identities.len(), THREADS);
     }
 }
