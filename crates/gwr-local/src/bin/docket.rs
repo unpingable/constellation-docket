@@ -24,6 +24,7 @@ use gwr_local::broker::SubprocessGitBroker;
 use gwr_local::campaign_export;
 use gwr_local::capabilities::StandingTokenCodec;
 use gwr_local::governed_loop;
+use gwr_local::local_execution_standing::{self, GrantInput};
 use gwr_local::providers::fake::{Script, ScriptedProvider};
 use gwr_local::store::SqliteStore;
 use gwr_runtime::ports::adapters::{Clock, IdSource};
@@ -69,6 +70,7 @@ Repository identity:
   repository migrate-attempt  Explicitly bind one legacy work request
   continuity subject          Export the exact Docket-owned subject [--json]
   governed-loop inspect       Read one exact governed-loop issuance record
+  governed-loop standing-grant | standing-revoke | standing-supersede
 
 Governed workflow:
   request create
@@ -378,7 +380,9 @@ fn run(args: &[String]) -> Result<(), String> {
             let envelope = read_stdin_bounded()?;
             let trust = std::fs::read(need(args, "--trust")?)
                 .map_err(|error| format!("reading governed-loop trust: {error}"))?;
-            let custody = governed_loop::accept(
+            let local = has(args, "--require-local-standing-snapshot");
+            let call = if local { governed_loop::accept_local } else { governed_loop::accept };
+            let custody = call(
                 &st.dir.join("state.sqlite"),
                 &envelope,
                 &trust,
@@ -391,6 +395,40 @@ fn run(args: &[String]) -> Result<(), String> {
                 serde_json::to_string(&custody)
                     .map_err(|error| format!("governed custody response: {error}"))?
             );
+            Ok(())
+        }
+        ["governed-loop", "standing-grant"] => {
+            let st=State::open(args)?;
+            let issued:u64=need(args,"--issued-at-unix-ms")?.parse().map_err(|_|"invalid issued time".to_owned())?;
+            let expires:u64=need(args,"--expires-at-unix-ms")?.parse().map_err(|_|"invalid expiry".to_owned())?;
+            let id=local_execution_standing::grant(&st.dir.join("state.sqlite"),&GrantInput{
+                operator:&need(args,"--operator")?, campaign:&need(args,"--campaign")?,
+                occurrence:&need(args,"--occurrence")?, program:&need(args,"--program")?,
+                work_schema:&need(args,"--work-schema")?, work:&need(args,"--work")?,
+                subject:&need(args,"--subject")?, scope:&need(args,"--scope")?,
+                issued_at_unix_ms:issued, expires_at_unix_ms:expires,
+            })?;
+            println!("execution_standing: {id}"); Ok(())
+        }
+        ["governed-loop", action @ ("standing-revoke" | "standing-supersede")] => {
+            let st=State::open(args)?;
+            let at:u64=need(args,"--at-unix-ms")?.parse().map_err(|_|"invalid transition time".to_owned())?;
+            let status=if *action=="standing-revoke"{"revoked"}else{"superseded"};
+            let revision=local_execution_standing::transition(&st.dir.join("state.sqlite"),&need(args,"--execution-standing")?,status,at)?;
+            println!("revision: {revision}"); Ok(())
+        }
+        ["governed-loop", "standing-snapshot"] => {
+            let st=State::open(args)?;
+            let snapshot=local_execution_standing::inspect_snapshot(&st.dir.join("state.sqlite"),&need(args,"--issuance")?)?;
+            println!("{}",serde_json::to_string(&snapshot).map_err(|e|format!("local-standing-snapshot-json:{e}"))?);
+            Ok(())
+        }
+        ["governed-loop", "standing-write-launcher"] => {
+            local_execution_standing::write_zero_arg_launcher(
+                &PathBuf::from(need(args,"--resolver")?),
+                &PathBuf::from(need(args,"--config")?),
+                &PathBuf::from(need(args,"--output")?),
+            )?;
             Ok(())
         }
         ["governed-loop", "reconcile-issuance"] => {

@@ -91,10 +91,52 @@ pub fn accept(
     executor: &Path,
     executor_config: &Path,
 ) -> Result<DocketCustodyWireV1, String> {
+    accept_inner(
+        database,
+        envelope_bytes,
+        trust_bytes,
+        standing_resolver,
+        executor,
+        executor_config,
+        false,
+    )
+}
+
+/// Local-standing deployment mode. Every new custody must have an exact
+/// immutable local snapshot; there is no per-request fallback to external V1.
+pub fn accept_local(
+    database: &Path,
+    envelope_bytes: &[u8],
+    trust_bytes: &[u8],
+    standing_resolver: &Path,
+    executor: &Path,
+    executor_config: &Path,
+) -> Result<DocketCustodyWireV1, String> {
+    accept_inner(
+        database,
+        envelope_bytes,
+        trust_bytes,
+        standing_resolver,
+        executor,
+        executor_config,
+        true,
+    )
+}
+
+fn accept_inner(
+    database: &Path,
+    envelope_bytes: &[u8],
+    trust_bytes: &[u8],
+    standing_resolver: &Path,
+    executor: &Path,
+    executor_config: &Path,
+    require_local_snapshot: bool,
+) -> Result<DocketCustodyWireV1, String> {
     let (envelope, issuance) = verify_signed_issuance(envelope_bytes, trust_bytes)?;
-    let mut store = SqliteGovernedCustodyStoreV1::open(database)?;
+    let mut store = SqliteGovernedCustodyStoreV1::open(database, require_local_snapshot)?;
     let mut resolver = LocalStandingResolverV1 {
         program: standing_resolver,
+        deadline: require_local_snapshot.then_some(std::time::Duration::from_secs(5)),
     };
     let mut executor = LocalGovernedExecutorV1 {
         program: executor,
@@ -121,7 +163,7 @@ pub fn reconcile(
     executor_config: &Path,
 ) -> Result<DocketReconciliationWireV1, String> {
     require_digest(issuance, "issuance")?;
-    let mut store = SqliteGovernedCustodyStoreV1::open(database)?;
+    let mut store = SqliteGovernedCustodyStoreV1::open(database, false)?;
     let mut executor = LocalGovernedExecutorV1 {
         program: executor,
         config: executor_config,
@@ -147,6 +189,7 @@ pub fn inspect(database: &Path, issuance: &str) -> Result<GovernedLoopInspection
 
 struct LocalStandingResolverV1<'a> {
     program: &'a Path,
+    deadline: Option<std::time::Duration>,
 }
 
 impl ExecutionStandingResolverV1 for LocalStandingResolverV1<'_> {
@@ -154,7 +197,7 @@ impl ExecutionStandingResolverV1 for LocalStandingResolverV1<'_> {
         &mut self,
         request: &ExecutionStandingRequestV1,
     ) -> Result<ExecutionStandingResolutionV1, String> {
-        invoke_json(self.program, &[], request, usize::MAX)
+        invoke_json_with_deadline(self.program, &[], request, 1_048_576, self.deadline)
     }
 }
 
@@ -216,10 +259,11 @@ impl GovernedClockV1 for SystemGovernedClockV1 {
 
 struct SqliteGovernedCustodyStoreV1 {
     connection: Connection,
+    require_local_snapshot: bool,
 }
 
 impl SqliteGovernedCustodyStoreV1 {
-    fn open(database: &Path) -> Result<Self, String> {
+    fn open(database: &Path, require_local_snapshot: bool) -> Result<Self, String> {
         let connection =
             Connection::open(database).map_err(|error| format!("governed-custody-open:{error}"))?;
         connection
@@ -228,7 +272,11 @@ impl SqliteGovernedCustodyStoreV1 {
         connection
             .pragma_update(None, "busy_timeout", 5_000_u32)
             .map_err(|error| format!("governed-custody-busy-timeout:{error}"))?;
-        Ok(Self { connection })
+        crate::local_execution_standing::migrate(&connection)?;
+        Ok(Self {
+            connection,
+            require_local_snapshot,
+        })
     }
 
     fn open_read_only(database: &Path) -> Result<Self, String> {
@@ -242,7 +290,10 @@ impl SqliteGovernedCustodyStoreV1 {
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| format!("governed-custody-read-timeout:{error}"))?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            require_local_snapshot: false,
+        })
     }
 }
 
@@ -259,6 +310,55 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
             .connection
             .transaction()
             .map_err(|error| format!("governed-custody-transaction:{error}"))?;
+        let local_snapshot: Option<(u64, String, u64, u64)> = transaction
+            .query_row(
+                "SELECT r.revision,r.status,g.issued_at,g.expires_at
+             FROM local_execution_standing_grant g
+             JOIN local_execution_standing_revision r USING(execution_standing)
+             WHERE g.execution_standing=?1 AND r.currentness=?2
+               AND g.campaign=?3 AND g.occurrence=?4 AND g.program=?5
+               AND g.work_schema=?6 AND g.work=?7 AND g.subject=?8 AND g.scope=?9",
+                params![
+                    standing.execution_standing,
+                    standing.currentness,
+                    issuance.key.campaign,
+                    issuance.key.occurrence,
+                    issuance.program,
+                    issuance.work_schema,
+                    issuance.work,
+                    issuance.subject,
+                    issuance.scope
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|error| format!("governed-local-standing-snapshot:{error}"))?;
+        if self.require_local_snapshot && local_snapshot.is_none() {
+            return Err("governed-local-standing-snapshot-required".to_owned());
+        }
+        if let Some((revision, status, issued_at, expires_at)) = &local_snapshot {
+            if status != "current"
+                || *issued_at > standing.resolved_at_unix_ms
+                || *expires_at != standing.expires_at_unix_ms
+            {
+                return Err("governed-local-standing-snapshot-mismatch".to_owned());
+            }
+            let expected = hash_domain(
+                "docket.governed-loop.local-standing-resolution/v1",
+                format!(
+                    "{}\0{}\0{}\0{}\0{}",
+                    standing.execution_standing,
+                    revision,
+                    standing.currentness,
+                    issuance.issuance,
+                    standing.resolved_at_unix_ms
+                )
+                .as_bytes(),
+            );
+            if expected != standing.resolution {
+                return Err("governed-local-standing-resolution-mismatch".to_owned());
+            }
+        }
         transaction
             .execute(
                 "INSERT INTO governed_execution_standing_use
@@ -314,6 +414,16 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                 ],
             )
             .map_err(|error| format!("governed-attempt-insert:{error}"))?;
+        if let Some((revision, status, _issued_at, expires_at)) = local_snapshot {
+            transaction.execute(
+                "INSERT INTO governed_local_standing_snapshot
+                 (issuance,execution_standing,revision,status,resolved_at,expires_at,currentness,resolution)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![issuance.issuance,standing.execution_standing,revision,status,
+                    u64_to_i64(standing.resolved_at_unix_ms)?,expires_at,
+                    standing.currentness,standing.resolution],
+            ).map_err(|error|format!("governed-local-standing-snapshot-insert:{error}"))?;
+        }
         transaction
             .commit()
             .map_err(|error| format!("governed-custody-commit:{error}"))
@@ -759,6 +869,16 @@ fn invoke_json<I: Serialize + ?Sized, O: DeserializeOwned>(
     input: &I,
     stdout_limit: usize,
 ) -> Result<O, String> {
+    invoke_json_with_deadline(program, arguments, input, stdout_limit, None)
+}
+
+fn invoke_json_with_deadline<I: Serialize + ?Sized, O: DeserializeOwned>(
+    program: &Path,
+    arguments: &[&str],
+    input: &I,
+    stdout_limit: usize,
+    deadline: Option<std::time::Duration>,
+) -> Result<O, String> {
     let bytes = serde_json::to_vec(input).map_err(|error| format!("process-request:{error}"))?;
     let mut child = Command::new(program)
         .args(arguments)
@@ -783,9 +903,30 @@ fn invoke_json<I: Serialize + ?Sized, O: DeserializeOwned>(
         .ok_or_else(|| "process-stderr-unavailable".to_owned())?;
     let stdout_reader = std::thread::spawn(move || read_bounded_draining(stdout, stdout_limit));
     let stderr_reader = std::thread::spawn(move || read_bounded_draining(stderr, 2048));
-    let status = child
-        .wait()
-        .map_err(|error| format!("process-wait:{error}"))?;
+    let mut timed_out = false;
+    let status = if let Some(limit) = deadline {
+        let end = std::time::Instant::now() + limit;
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("process-wait:{error}"))?
+            {
+                break status;
+            }
+            if std::time::Instant::now() >= end {
+                let _ = child.kill();
+                timed_out = true;
+                break child
+                    .wait()
+                    .map_err(|error| format!("process-reap:{error}"))?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    } else {
+        child
+            .wait()
+            .map_err(|error| format!("process-wait:{error}"))?
+    };
     let (stdout, stdout_overflow) = stdout_reader
         .join()
         .map_err(|_| "process-stdout-reader-panicked".to_owned())?
@@ -794,6 +935,9 @@ fn invoke_json<I: Serialize + ?Sized, O: DeserializeOwned>(
         .join()
         .map_err(|_| "process-stderr-reader-panicked".to_owned())?
         .map_err(|error| format!("process-stderr:{error}"))?;
+    if timed_out {
+        return Err("process-deadline".to_owned());
+    }
     if !status.success() {
         return Err(format!(
             "process-refused:{}",
@@ -1276,6 +1420,81 @@ mod tests {
             std::fs::read(fixture.executor_program.with_extension("invocations")).unwrap(),
             b"x"
         );
+    }
+
+    #[test]
+    fn local_mode_requires_and_atomically_retains_exact_observed_snapshot() {
+        let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
+        let missing = accept_local(
+            &fixture.database,
+            &fixture.envelope,
+            &fixture.trust,
+            &fixture.standing_program,
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+        )
+        .unwrap_err();
+        assert_eq!(missing, "governed-local-standing-snapshot-required");
+
+        let input = crate::local_execution_standing::GrantInput {
+            operator: "operator-1",
+            campaign: &fixture.issuance.key.campaign,
+            occurrence: &fixture.issuance.key.occurrence,
+            program: &fixture.issuance.program,
+            work_schema: &fixture.issuance.work_schema,
+            work: &fixture.issuance.work,
+            subject: &fixture.issuance.subject,
+            scope: &fixture.issuance.scope,
+            issued_at_unix_ms: 1000,
+            expires_at_unix_ms: 1300,
+        };
+        crate::local_execution_standing::grant(&fixture.database, &input).unwrap();
+        let standing = crate::local_execution_standing::resolve(
+            &fixture.database,
+            "operator-1",
+            &ExecutionStandingRequestV1 {
+                schema: STANDING_REQUEST_SCHEMA_V1.to_owned(),
+                issuance: fixture.issuance.clone(),
+                now_unix_ms: 1100,
+            },
+        )
+        .unwrap();
+        let custody =
+            gwr_runtime::governed_loop::make_custody(&fixture.issuance, &standing, 1100).unwrap();
+        let (envelope, issuance) =
+            verify_signed_issuance(&fixture.envelope, &fixture.trust).unwrap();
+        let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database, true).unwrap();
+        store
+            .insert_custody(
+                &envelope,
+                &issuance,
+                &standing,
+                &custody,
+                &ExecutorBindingV1 {
+                    identity: digest("binding"),
+                    program_digest: digest("program-digest"),
+                    plan: issuance.work.clone(),
+                },
+            )
+            .unwrap();
+        crate::local_execution_standing::transition(
+            &fixture.database,
+            &standing.execution_standing,
+            "revoked",
+            1150,
+        )
+        .unwrap();
+        let snapshot = crate::local_execution_standing::inspect_snapshot(
+            &fixture.database,
+            &issuance.issuance,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(snapshot.status, "current");
+        assert_eq!(snapshot.resolved_at_unix_ms, 1100);
+        assert_eq!(snapshot.expires_at_unix_ms, 1300);
+        assert_eq!(snapshot.currentness, standing.currentness);
     }
 
     #[test]
