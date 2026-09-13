@@ -8,7 +8,6 @@ use gwr_local::providers::codex::{populate_workspace, CodexExecProvider};
 use gwr_runtime::ports::labor_provider::{
     BoundedAssignment, LaborProvider, PreparationOutcome, ProviderError,
 };
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -56,11 +55,8 @@ fn fixture(name: &str) -> (PathBuf, PathBuf, String) {
     (dir, workspace, basis)
 }
 
-fn fake_codex(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("fake-codex");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+fn fake_codex() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-contract-fake-codex")
 }
 
 fn assignment(workspace: &Path, basis: &str) -> BoundedAssignment {
@@ -87,10 +83,7 @@ fn workspace_is_disposable_and_has_no_path_back_to_the_governed_repo() {
 fn candidate_patch_is_collected_by_the_runtime_from_the_worktree() {
     let (dir, workspace, basis) = fixture("candidate");
     // The fake codex edits the file and *lies* on stdout about what it did.
-    let bin = fake_codex(
-        &dir,
-        "printf 'fn fixed() {}\\n' > src/lib.rs\necho 'I also deleted everything (a lie)'",
-    );
+    let bin = fake_codex();
     let mut provider = CodexExecProvider {
         codex_bin: bin,
         timeout: Duration::from_secs(10),
@@ -113,7 +106,7 @@ fn candidate_patch_is_collected_by_the_runtime_from_the_worktree() {
 #[test]
 fn nonzero_exit_is_provider_failure_not_an_effect_outcome() {
     let (dir, workspace, basis) = fixture("failure");
-    let bin = fake_codex(&dir, "echo 'cannot comply' >&2\nexit 3");
+    let bin = fake_codex();
     let mut provider = CodexExecProvider {
         codex_bin: bin,
         timeout: Duration::from_secs(10),
@@ -130,7 +123,7 @@ fn nonzero_exit_is_provider_failure_not_an_effect_outcome() {
 #[test]
 fn clean_exit_with_no_changes_is_failure_not_an_empty_candidate() {
     let (dir, workspace, basis) = fixture("nochange");
-    let bin = fake_codex(&dir, "echo 'done (did nothing)'");
+    let bin = fake_codex();
     let mut provider = CodexExecProvider {
         codex_bin: bin,
         timeout: Duration::from_secs(10),
@@ -143,7 +136,7 @@ fn clean_exit_with_no_changes_is_failure_not_an_empty_candidate() {
 #[test]
 fn hang_past_the_bound_is_provider_death() {
     let (dir, workspace, basis) = fixture("hang");
-    let bin = fake_codex(&dir, "sleep 30");
+    let bin = fake_codex();
     let mut provider = CodexExecProvider {
         codex_bin: bin,
         timeout: Duration::from_millis(400),
@@ -208,14 +201,7 @@ fn provider_workspace_is_not_inside_the_state_directory() {
     let ws_root = root.join("workspaces");
 
     // A provider that reports what it can reach from its working directory.
-    let probe = root.join("probe-codex");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        &probe,
-        "#!/bin/sh\nprintf 'fn fixed() {}\\n' > src/lib.rs\necho \"PARENT:$(ls .. 2>/dev/null | tr '\\n' ' ')\"\necho \"KEY:$(cat ../standing.key 2>/dev/null | head -c 8)\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = fake_codex();
 
     let registration = Command::new(env!("CARGO_BIN_EXE_docket"))
         .args([

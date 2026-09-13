@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+case "$PWD" in
+  */gwr-codex-candidate-*/workspace)
+    printf 'fn fixed() {}\n' > src/lib.rs
+    echo 'I also deleted everything (a lie)'
+    ;;
+  */gwr-codex-failure-*/workspace)
+    echo 'cannot comply' >&2
+    exit 3
+    ;;
+  */gwr-codex-nochange-*/workspace)
+    echo 'done (did nothing)'
+    ;;
+  */gwr-codex-hang-*/workspace)
+    sleep 30
+    ;;
+  *)
+    printf 'fn fixed() {}\n' > src/lib.rs
+    echo "PARENT:$(ls .. 2>/dev/null | tr '\n' ' ')"
+    echo "KEY:$(cat ../standing.key 2>/dev/null | head -c 8)"
+    ;;
+esac
