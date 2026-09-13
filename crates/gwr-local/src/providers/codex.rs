@@ -104,6 +104,8 @@ fn workspace_diff(workspace: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn kill_process_group(child: &mut Child) {
+    // The deployment supplies /bin/kill. Stop descendants in the group created
+    // below before reaping the direct child; timeout is not evidence of success.
     let group = format!("-{}", child.id());
     let _ = Command::new("/bin/kill")
         .args(["-KILL", "--", &group])

@@ -124,6 +124,14 @@ The broker is not a permission boundary, and Docket does not claim OS-level
 same-UID confinement. Read the complete
 [`trust-model.md`](governed-runtime/trust-model.md) before relying on a result.
 
+The optional CLI-backed Codex preparation adapter starts its local process in
+a separate process group. On timeout it uses the host's `/bin/kill` group
+operation, then kills and reaps the direct child. That procedure is qualified
+on Linux; it does not claim confinement of processes that leave the group.
+Timeout remains provider failure, not proof of a successful preparation or
+permission to repeat work. This adapter is separate from governed executor
+dispatch.
+
 The conformance record is executable engineering evidence, not a formal proof
 or a discharge of deployment premises. Earlier audit documents remain history;
 the current classification is

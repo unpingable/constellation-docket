@@ -46,6 +46,8 @@ impl HashChainIds {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before epoch")
             .as_nanos();
+        // Concurrent constructors can share a clock reading and PID. The
+        // process-local coordinate separates their otherwise identical chains.
         let instance = NEXT_ID_SOURCE_INSTANCE.fetch_add(1, Ordering::Relaxed);
         let seed = gwr_core::digest::Transcript::new("gwr:id-seed:v2")
             .text_field("nanos", &nanos.to_string())
