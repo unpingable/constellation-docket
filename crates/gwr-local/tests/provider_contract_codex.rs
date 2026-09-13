@@ -10,7 +10,7 @@ use gwr_runtime::ports::labor_provider::{
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn sh(dir: &Path, args: &[&str]) -> String {
     let out = Command::new(args[0])
@@ -56,6 +56,8 @@ fn fixture(name: &str) -> (PathBuf, PathBuf, String) {
 }
 
 fn fake_codex() -> PathBuf {
+    // Keep executable publication outside the concurrent test transition:
+    // Git supplies one immutable fixture before this process starts.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-contract-fake-codex")
 }
 
@@ -145,6 +147,27 @@ fn hang_past_the_bound_is_provider_death() {
         .prepare(&assignment(&workspace, &basis))
         .unwrap_err();
     assert!(matches!(err, ProviderError::Died(_)));
+    let pid: u32 = std::fs::read_to_string(dir.join("descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let terminal = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => matches!(stat.split_whitespace().nth(2), Some("Z" | "X")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => panic!("read descendant state: {error}"),
+        };
+        if terminal {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timeout descendant {pid} remained live"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

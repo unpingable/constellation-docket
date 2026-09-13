@@ -14,7 +14,10 @@ case "$PWD" in
     echo 'done (did nothing)'
     ;;
   */gwr-codex-hang-*/workspace)
-    sleep 30
+    sleep 30 &
+    descendant=$!
+    printf '%s\n' "$descendant" > ../descendant.pid
+    wait "$descendant"
     ;;
   *)
     printf 'fn fixed() {}\n' > src/lib.rs
