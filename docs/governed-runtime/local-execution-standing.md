@@ -13,17 +13,26 @@ Use `docket governed-loop standing-grant` before the AG spend, supplying every
 exact tuple field plus `--operator`, `--issued-at-unix-ms`, and
 `--expires-at-unix-ms`. Use `standing-revoke` or `standing-supersede` with the
 grant identity and a monotonic `--at-unix-ms`. Deployment tooling generates a
-measured zero-argument launcher with `standing-write-launcher`; both the
-resolver and its closed static config are verified before each invocation.
+measured zero-argument launcher with `standing-write-launcher`; it captures the
+resolver and closed static config from nonsymlink regular files, checks their
+enrolled hashes, seals both memfds against content and size changes, and then
+executes and reads only those sealed captures.
+The selected Python interpreter and its standard library remain trusted
+deployment inputs. The launcher generator observes the interpreter hash while
+enrolling, but the generated script's shebang does not reverify the already
+executing interpreter at runtime; deployment enrollment must pin it separately.
 
 The first prospective grant irreversibly enrolls that Docket state database in
 local snapshot-currentness mode and fixes its operator identity and 300-second
 maximum. Every later accept against that state requires local backing even when
 the caller omits `--require-local-standing-snapshot`; the flag only asserts the
 expected mode on a not-yet-enrolled database and cannot select weaker behavior.
-Docket requires the exact immutable revision
-named by the resolver's hashes and stores its permission identity, revision,
+Docket requires the exact immutable revision named by the resolver's hashes and
+stores its permission identity, revision,
 resolution time, expiry, currentness and resolution atomically with custody.
+The currentness digest commits the permission identity, immutable revision
+identity, status, resolution time and expiry; the resolution digest additionally
+commits the subsequently authenticated AG issuance.
 `governed-loop standing-snapshot --issuance DIGEST` reads that explicit backing
 receipt. Older external-resolver V1 custody remains readable and has no invented
 local snapshot.

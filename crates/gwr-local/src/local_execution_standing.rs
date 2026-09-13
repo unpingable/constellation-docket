@@ -75,17 +75,58 @@ fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     serde_json::to_vec(value).map_err(|e| format!("local-standing-canonical:{e}"))
 }
 
-fn currentness(id: &str, revision: u64, status: &str, changed: u64) -> String {
+fn revision_identity(id: &str, revision: u64, status: &str, changed: u64) -> String {
+    hash_domain(
+        "docket.governed-loop.local-standing-revision/v1",
+        format!("{id}\0{revision}\0{status}\0{changed}").as_bytes(),
+    )
+}
+
+fn currentness(
+    id: &str,
+    revision: u64,
+    revision_identity: &str,
+    status: &str,
+    resolved: u64,
+    expires: u64,
+) -> String {
     hash_domain(
         "docket.governed-loop.local-standing-currentness/v1",
-        format!("{id}\0{revision}\0{status}\0{changed}").as_bytes(),
+        format!("{id}\0{revision}\0{revision_identity}\0{status}\0{resolved}\0{expires}")
+            .as_bytes(),
     )
 }
 
 pub fn migrate(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(MIGRATION)
-        .map_err(|e| format!("local-standing-migrate:{e}"))
+        .map_err(|e| format!("local-standing-migrate:{e}"))?;
+    let has_attempt:i64=connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='governed_loop_attempt'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-table-check:{e}"))?;
+    let has_mode:i64=connection.query_row("SELECT COUNT(*) FROM pragma_table_info('governed_loop_attempt') WHERE name='local_standing_mode'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-check:{e}"))?;
+    if has_attempt == 1 && has_mode == 0 {
+        connection.execute("ALTER TABLE governed_loop_attempt ADD COLUMN local_standing_mode INTEGER NOT NULL DEFAULT 0 CHECK(local_standing_mode IN (0,1))",[]).map_err(|e|format!("local-standing-mode-add:{e}"))?;
+    }
+    Ok(())
+}
+
+pub fn grant_identity(input: &GrantInput<'_>) -> Result<String, String> {
+    let identity = GrantIdentity {
+        schema: "docket.governed-loop.local-execution-standing-grant/v1",
+        operator: input.operator,
+        campaign: input.campaign,
+        occurrence: input.occurrence,
+        program: input.program,
+        work_schema: input.work_schema,
+        work: input.work,
+        subject: input.subject,
+        scope: input.scope,
+        issued_at_unix_ms: input.issued_at_unix_ms,
+        expires_at_unix_ms: input.expires_at_unix_ms,
+    };
+    Ok(hash_domain(
+        "docket.governed-loop.local-execution-standing/v1",
+        &canonical(&identity)?,
+    ))
 }
 
 pub fn grant(database: &Path, input: &GrantInput<'_>) -> Result<String, String> {
@@ -132,24 +173,8 @@ pub fn grant(database: &Path, input: &GrantInput<'_>) -> Result<String, String> 
     {
         return Err("local-standing-lifetime".to_owned());
     }
-    let identity = GrantIdentity {
-        schema: "docket.governed-loop.local-execution-standing-grant/v1",
-        operator: input.operator,
-        campaign: input.campaign,
-        occurrence: input.occurrence,
-        program: input.program,
-        work_schema: input.work_schema,
-        work: input.work,
-        subject: input.subject,
-        scope: input.scope,
-        issued_at_unix_ms: input.issued_at_unix_ms,
-        expires_at_unix_ms: input.expires_at_unix_ms,
-    };
-    let id = hash_domain(
-        "docket.governed-loop.local-execution-standing/v1",
-        &canonical(&identity)?,
-    );
-    let cur = currentness(&id, 1, "current", input.issued_at_unix_ms);
+    let id = grant_identity(input)?;
+    let cur = revision_identity(&id, 1, "current", input.issued_at_unix_ms);
     let mut db = Connection::open(database).map_err(|e| format!("local-standing-open:{e}"))?;
     db.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| e.to_string())?;
@@ -228,7 +253,7 @@ pub fn transition(database: &Path, id: &str, status: &str, at: u64) -> Result<u6
     let next = revision
         .checked_add(1)
         .ok_or_else(|| "local-standing-revision-range".to_owned())?;
-    let cur = currentness(id, next, status, at);
+    let cur = revision_identity(id, next, status, at);
     tx.execute(
         "INSERT INTO local_execution_standing_revision VALUES (?1,?2,?3,?4,?5)",
         params![id, next, status, i64v(at)?, cur],
@@ -254,7 +279,7 @@ pub fn resolve(
     if enrolled != operator {
         return Err("local-standing-operator-enrollment-mismatch".to_owned());
     }
-    let mut statement=db.prepare("SELECT g.execution_standing,p.revision,r.status,g.issued_at,g.expires_at,r.currentness FROM local_execution_standing_grant g JOIN local_execution_standing_projection p USING(execution_standing) JOIN local_execution_standing_revision r USING(execution_standing,revision) WHERE g.operator=?1 AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4 AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8 LIMIT 2").map_err(|e|format!("local-standing-query-prepare:{e}"))?;
+    let mut statement=db.prepare("SELECT g.execution_standing,p.revision,r.status,g.issued_at,g.expires_at,r.revision_identity FROM local_execution_standing_grant g JOIN local_execution_standing_projection p USING(execution_standing) JOIN local_execution_standing_revision r USING(execution_standing,revision) WHERE g.operator=?1 AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4 AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8 LIMIT 2").map_err(|e|format!("local-standing-query-prepare:{e}"))?;
     let mut rows = statement
         .query(params![
             operator,
@@ -285,7 +310,7 @@ pub fn resolve(
     {
         return Err("local-standing-ambiguous".to_owned());
     }
-    let (id, revision, state, issued, expires, current) = found;
+    let (id, revision, state, issued, expires, revision_id) = found;
     let status = if state == "revoked" {
         ExecutionStandingStatusV1::Revoked
     } else if state == "superseded" {
@@ -297,6 +322,14 @@ pub fn resolve(
     } else {
         ExecutionStandingStatusV1::Current
     };
+    let current = currentness(
+        &id,
+        revision,
+        &revision_id,
+        &state,
+        request.now_unix_ms,
+        expires,
+    );
     let resolution = hash_domain(
         "docket.governed-loop.local-standing-resolution/v1",
         format!(
@@ -359,30 +392,73 @@ fn file_digest(path: &Path, limit: u64) -> Result<String, String> {
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
-fn shq(path: &Path) -> Result<String, String> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| "local-standing-pin-path-utf8".to_owned())?;
-    if value.contains('\n') || value.contains('\r') {
-        return Err("local-standing-pin-path-line".to_owned());
-    }
-    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
-}
-
-/// Writes an immutable zero-argv launcher which verifies both deployment files
+/// Writes an immutable zero-argv launcher which captures and seals both deployment files
 /// before invoking the resolver. The mutable ledger is named only inside the
 /// measured config, never through ambient argv or environment.
 pub fn write_zero_arg_launcher(
     resolver: &Path,
     config: &Path,
+    python_interpreter: &Path,
     output: &Path,
 ) -> Result<(), String> {
-    if !resolver.is_absolute() || !config.is_absolute() || !output.is_absolute() {
+    if !resolver.is_absolute()
+        || !config.is_absolute()
+        || !python_interpreter.is_absolute()
+        || !output.is_absolute()
+    {
         return Err("local-standing-pin-path-absolute".to_owned());
     }
     let rd = file_digest(resolver, 512 * 1024 * 1024)?;
     let cd = file_digest(config, 65_536)?;
-    let body=format!("#!/bin/sh\nset -eu\n[ \"$#\" -eq 0 ] || exit 64\nr={}\nc={}\nexec 3<\"$c\"\nexec 4<\"$r\"\n[ \"$(sha256sum -- /proc/self/fd/4 | cut -d ' ' -f 1)\" = '{}' ] || exit 65\n[ \"$(sha256sum -- /proc/self/fd/3 | cut -d ' ' -f 1)\" = '{}' ] || exit 66\nexec /proc/self/fd/4 --config-fd 3\n",shq(resolver)?,shq(config)?,rd,cd);
+    let _interpreter_digest = file_digest(python_interpreter, 128 * 1024 * 1024)?;
+    let py = python_interpreter
+        .to_str()
+        .ok_or_else(|| "local-standing-pin-path-utf8".to_owned())?;
+    if py.contains(char::is_whitespace) {
+        return Err("local-standing-interpreter-path".to_owned());
+    }
+    let rp = serde_json::to_string(
+        resolver
+            .to_str()
+            .ok_or_else(|| "local-standing-pin-path-utf8".to_owned())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let cp = serde_json::to_string(
+        config
+            .to_str()
+            .ok_or_else(|| "local-standing-pin-path-utf8".to_owned())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let body = format!(
+        r##"#!{py} -I
+import fcntl,hashlib,os,stat,sys
+if len(sys.argv)!=1: raise SystemExit("local standing launcher accepts no arguments")
+def capture(path,want,maximum,name,executable):
+ flags=os.O_RDONLY|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0); source=os.open(path,flags)
+ meta=os.fstat(source)
+ if not stat.S_ISREG(meta.st_mode) or (executable and meta.st_mode&0o111==0): raise SystemExit(name+" is not a suitable regular file")
+ image=os.memfd_create(name,os.MFD_ALLOW_SEALING); h=hashlib.sha256(); total=0
+ while True:
+  block=os.read(source,65536)
+  if not block: break
+  total+=len(block)
+  if total>maximum: raise SystemExit(name+" exceeds bounded size")
+  h.update(block); view=memoryview(block)
+  while view:
+   written=os.write(image,view)
+   if written<=0: raise SystemExit(name+" image write was incomplete")
+   view=view[written:]
+ os.close(source)
+ if h.hexdigest()!=want: raise SystemExit(name+" digest mismatch")
+ os.fchmod(image,0o500 if executable else 0o400)
+ fcntl.fcntl(image,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SEAL)
+ os.lseek(image,0,os.SEEK_SET); os.set_inheritable(image,True); return image
+resolver=capture({rp},"{rd}",536870912,"docket-local-standing-resolver",True)
+config=capture({cp},"{cd}",65536,"docket-local-standing-config",False)
+program="/proc/self/fd/"+str(resolver); config_path="/proc/self/fd/"+str(config)
+os.execve(program,[program,"--config",config_path],{{}})
+"##
+    );
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -396,7 +472,11 @@ pub fn write_zero_arg_launcher(
 }
 
 pub fn read_config(path: &Path) -> Result<LocalResolverConfigV1, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("local-standing-config-read:{e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("local-standing-config-open:{e}"))?;
+    let mut bytes = Vec::new();
+    file.take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("local-standing-config-read:{e}"))?;
     if bytes.is_empty() || bytes.len() > 65_536 {
         return Err("local-standing-config-size".to_owned());
     }
@@ -422,6 +502,8 @@ mod tests {
     use gwr_runtime::governed_loop::{
         AgIssuanceWireV1, OccurrenceKeyWireV1, STANDING_REQUEST_SCHEMA_V1,
     };
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn digest(label: &str) -> String {
@@ -436,9 +518,9 @@ mod tests {
         ))
     }
     fn issuance() -> AgIssuanceWireV1 {
-        AgIssuanceWireV1 {
+        let mut issuance = AgIssuanceWireV1 {
             schema: "ag.governed-loop.issuance/v1".into(),
-            issuance: digest("issuance"),
+            issuance: String::new(),
             key: OccurrenceKeyWireV1 {
                 campaign: digest("campaign"),
                 occurrence: "123e4567-e89b-42d3-a456-426614174000".into(),
@@ -453,7 +535,17 @@ mod tests {
             standing_resolution: digest("ag-standing"),
             mandate: digest("mandate"),
             spend: digest("spend"),
-        }
+        };
+        refresh_identity(&mut issuance);
+        assert!(gwr_runtime::governed_loop::validate_issuance(&issuance).is_ok());
+        issuance
+    }
+    fn refresh_identity(issuance: &mut AgIssuanceWireV1) {
+        let basis = serde_json::json!({"key":{"campaign":issuance.key.campaign,"occurrence":issuance.key.occurrence},"mandate":issuance.mandate,"observation":issuance.observation,"program":issuance.program,"proposal":issuance.proposal,"scope":issuance.scope,"spend":issuance.spend,"standing_resolution":issuance.standing_resolution,"subject":issuance.subject,"work":issuance.work,"work_schema":issuance.work_schema});
+        issuance.issuance = hash_domain(
+            "ag.governed-loop.issuance/v1",
+            &serde_json::to_vec(&basis).unwrap(),
+        );
     }
     fn input<'a>(i: &'a AgIssuanceWireV1, issued: u64, expires: u64) -> GrantInput<'a> {
         GrantInput {
@@ -495,24 +587,28 @@ mod tests {
     fn lifetime_and_exact_tuple_fail_closed() {
         let db = database();
         let i = issuance();
+        grant(&db, &input(&i, 1000, 301000)).unwrap();
+        let second = database();
         assert_eq!(
-            grant(&db, &input(&i, 1000, 1301)).unwrap_err(),
+            grant(&second, &input(&i, 1000, 301001)).unwrap_err(),
             "local-standing-lifetime"
         );
-        grant(&db, &input(&i, 1000, 1300)).unwrap();
         let mut wrong = i.clone();
         wrong.work = digest("other-work");
+        refresh_identity(&mut wrong);
+        assert!(gwr_runtime::governed_loop::validate_issuance(&wrong).is_ok());
         assert_eq!(
             resolve(&db, "operator-1", &request(wrong, 1100)).unwrap_err(),
             "local-standing-absent"
         );
         assert_eq!(
-            resolve(&db, "operator-1", &request(i, 1300))
+            resolve(&db, "operator-1", &request(i, 301000))
                 .unwrap()
                 .status,
             ExecutionStandingStatusV1::Expired
         );
         let _ = std::fs::remove_file(db);
+        let _ = std::fs::remove_file(second);
     }
 
     #[test]
@@ -526,5 +622,98 @@ mod tests {
             "local-standing-ambiguous"
         );
         let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn concurrent_first_enrollment_fixes_one_operator() {
+        let db = database();
+        let i = issuance();
+        let mut handles = Vec::new();
+        for operator in ["operator-1", "operator-2"] {
+            let db = db.clone();
+            let i = i.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut value = input(&i, 1000, 1300);
+                value.operator = operator;
+                grant(&db, &value)
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+        let _ = std::fs::remove_file(db);
+    }
+
+    #[test]
+    fn measured_launcher_refuses_path_replacement_and_content_mutation() {
+        let positive = database().with_extension("launcher-positive");
+        std::fs::create_dir(&positive).unwrap();
+        let resolver = positive.join("resolver");
+        let config = positive.join("config");
+        let launcher = positive.join("launcher");
+        std::fs::write(&resolver, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&config, b"{}\n").unwrap();
+        write_zero_arg_launcher(&resolver, &config, Path::new("/usr/bin/python3"), &launcher)
+            .unwrap();
+        assert!(Command::new(&launcher).status().unwrap().success());
+        let _ = std::fs::remove_dir_all(positive);
+        for target in ["resolver", "config"] {
+            for replacement in [false, true] {
+                let root = database().with_extension(format!("launcher-{target}-{replacement}"));
+                std::fs::create_dir(&root).unwrap();
+                let resolver = root.join("resolver");
+                let config = root.join("config.json");
+                let launcher = root.join("launcher");
+                std::fs::write(&resolver, b"#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                std::fs::write(&config, b"{}\n").unwrap();
+                write_zero_arg_launcher(
+                    &resolver,
+                    &config,
+                    Path::new("/usr/bin/python3"),
+                    &launcher,
+                )
+                .unwrap();
+                let selected = if target == "resolver" {
+                    &resolver
+                } else {
+                    &config
+                };
+                if replacement {
+                    let changed = root.join("changed");
+                    std::fs::write(&changed, b"changed bytes\n").unwrap();
+                    if target == "resolver" {
+                        std::fs::set_permissions(&changed, std::fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                    }
+                    std::fs::rename(changed, selected).unwrap();
+                } else {
+                    std::fs::write(selected, b"changed bytes\n").unwrap();
+                }
+                assert!(!Command::new(&launcher).status().unwrap().success());
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[test]
+    fn launcher_executes_sealed_captures_after_originals_mutate() {
+        let root = database().with_extension("launcher-sealed-consumption");
+        std::fs::create_dir(&root).unwrap();
+        let resolver = root.join("resolver");
+        let config = root.join("config");
+        let launcher = root.join("launcher");
+        std::fs::write(&config, b"original-config\n").unwrap();
+        let script=format!("#!/bin/sh\nprintf changed > '{}'\nprintf changed > '{}'\n[ \"$(cat \"$2\")\" = original-config ]\n",resolver.display(),config.display());
+        std::fs::write(&resolver, script).unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_zero_arg_launcher(&resolver, &config, Path::new("/usr/bin/python3"), &launcher)
+            .unwrap();
+        assert!(Command::new(&launcher).status().unwrap().success());
+        assert_eq!(std::fs::read(&resolver).unwrap(), b"changed");
+        assert_eq!(std::fs::read(&config).unwrap(), b"changed");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

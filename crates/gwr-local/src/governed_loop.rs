@@ -134,9 +134,10 @@ fn accept_inner(
 ) -> Result<DocketCustodyWireV1, String> {
     let (envelope, issuance) = verify_signed_issuance(envelope_bytes, trust_bytes)?;
     let mut store = SqliteGovernedCustodyStoreV1::open(database, require_local_snapshot)?;
+    let effective_local_mode = store.require_local_snapshot;
     let mut resolver = LocalStandingResolverV1 {
         program: standing_resolver,
-        deadline: require_local_snapshot.then_some(std::time::Duration::from_secs(5)),
+        deadline: effective_local_mode.then_some(std::time::Duration::from_secs(5)),
     };
     let mut executor = LocalGovernedExecutorV1 {
         program: executor,
@@ -185,6 +186,19 @@ pub fn inspect(database: &Path, issuance: &str) -> Result<GovernedLoopInspection
     require_digest(issuance, "issuance")?;
     let mut store = SqliteGovernedCustodyStoreV1::open_read_only(database)?;
     governed_service::inspect(&mut store, issuance)
+}
+
+/// Reads a locally backed standing receipt only after the complete retained
+/// custody and immutable grant/revision chain has validated.
+pub fn inspect_local_snapshot(
+    database: &Path,
+    issuance: &str,
+) -> Result<Option<crate::local_execution_standing::LocalCustodySnapshotV1>, String> {
+    let inspected = inspect(database, issuance)?;
+    if inspected.record.is_none() {
+        return Ok(None);
+    }
+    crate::local_execution_standing::inspect_snapshot(database, issuance)
 }
 
 struct LocalStandingResolverV1<'a> {
@@ -318,17 +332,23 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
             .connection
             .transaction()
             .map_err(|error| format!("governed-custody-transaction:{error}"))?;
-        let local_snapshot: Option<(u64, String, u64, u64)> = transaction
-            .query_row(
-                "SELECT r.revision,r.status,g.issued_at,g.expires_at
+        let enrolled_now:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM local_execution_standing_deployment WHERE singleton=1 AND mode='snapshot_currentness' AND max_lifetime_ms=300000)",[],|row|row.get(0)).map_err(|error|format!("local-standing-enrollment-read:{error}"))?;
+        let require_local_snapshot = self.require_local_snapshot || enrolled_now;
+        let mut statement = transaction
+            .prepare(
+                "SELECT r.revision,r.status,g.issued_at,g.expires_at,r.revision_identity
              FROM local_execution_standing_grant g
              JOIN local_execution_standing_revision r USING(execution_standing)
-             WHERE g.execution_standing=?1 AND r.currentness=?2
-               AND g.campaign=?3 AND g.occurrence=?4 AND g.program=?5
-               AND g.work_schema=?6 AND g.work=?7 AND g.subject=?8 AND g.scope=?9",
+             WHERE g.execution_standing=?1
+               AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4
+               AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8
+             ORDER BY r.revision LIMIT 4097",
+            )
+            .map_err(|error| format!("governed-local-standing-snapshot-prepare:{error}"))?;
+        let mapped = statement
+            .query_map(
                 params![
                     standing.execution_standing,
-                    standing.currentness,
                     issuance.key.campaign,
                     issuance.key.occurrence,
                     issuance.program,
@@ -337,19 +357,73 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                     issuance.subject,
                     issuance.scope
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, u64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
             )
-            .optional()
-            .map_err(|error| format!("governed-local-standing-snapshot:{error}"))?;
-        if self.require_local_snapshot && local_snapshot.is_none() {
+            .map_err(|error| format!("governed-local-standing-snapshot-query:{error}"))?;
+        let mut count = 0usize;
+        let mut local_snapshot = None;
+        for candidate in mapped {
+            count += 1;
+            if count > 4096 {
+                return Err("governed-local-standing-revision-limit".to_owned());
+            }
+            let candidate = candidate
+                .map_err(|error| format!("governed-local-standing-snapshot-row:{error}"))?;
+            let expected = hash_domain(
+                "docket.governed-loop.local-standing-currentness/v1",
+                format!(
+                    "{}\0{}\0{}\0{}\0{}\0{}",
+                    standing.execution_standing,
+                    candidate.0,
+                    candidate.4,
+                    candidate.1,
+                    standing.resolved_at_unix_ms,
+                    candidate.3
+                )
+                .as_bytes(),
+            );
+            if expected == standing.currentness {
+                if local_snapshot.is_some() {
+                    return Err("governed-local-standing-snapshot-ambiguous".to_owned());
+                }
+                local_snapshot = Some(candidate);
+            }
+        }
+        drop(statement);
+        if require_local_snapshot && local_snapshot.is_none() {
             return Err("governed-local-standing-snapshot-required".to_owned());
         }
-        if let Some((revision, status, issued_at, expires_at)) = &local_snapshot {
+        if let Some((revision, status, issued_at, expires_at, revision_identity)) = &local_snapshot
+        {
             if status != "current"
                 || *issued_at > standing.resolved_at_unix_ms
                 || *expires_at != standing.expires_at_unix_ms
             {
                 return Err("governed-local-standing-snapshot-mismatch".to_owned());
+            }
+            let expected_currentness = hash_domain(
+                "docket.governed-loop.local-standing-currentness/v1",
+                format!(
+                    "{}\0{}\0{}\0{}\0{}\0{}",
+                    standing.execution_standing,
+                    revision,
+                    revision_identity,
+                    status,
+                    standing.resolved_at_unix_ms,
+                    expires_at
+                )
+                .as_bytes(),
+            );
+            if expected_currentness != standing.currentness {
+                return Err("governed-local-standing-currentness-mismatch".to_owned());
             }
             let expected = hash_domain(
                 "docket.governed-loop.local-standing-resolution/v1",
@@ -388,10 +462,10 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                   signature,campaign,occurrence,program,proposal,work_schema,work,subject,scope,
                   observation,ag_standing_resolution,mandate,ag_spend,execution_standing,
                   standing_currentness,attempt,executor_marker,executor_binding,
-                  executor_program_digest,executor_plan,accepted_at,status)
+                  executor_program_digest,executor_plan,accepted_at,status,local_standing_mode)
                  VALUES
                  (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                  ?19,?20,?21,?22,?23,?24,?25,?26,'accepted')",
+                  ?19,?20,?21,?22,?23,?24,?25,?26,'accepted',?27)",
                 params![
                     issuance.issuance,
                     envelope.body_b64,
@@ -418,11 +492,13 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                     executor_binding.identity,
                     executor_binding.program_digest,
                     executor_binding.plan,
-                    u64_to_i64(custody.accepted_at_unix_ms)?
+                    u64_to_i64(custody.accepted_at_unix_ms)?,
+                    if require_local_snapshot { 1 } else { 0 }
                 ],
             )
             .map_err(|error| format!("governed-attempt-insert:{error}"))?;
-        if let Some((revision, status, _issued_at, expires_at)) = local_snapshot {
+        if let Some((revision, status, _issued_at, expires_at, _revision_identity)) = local_snapshot
+        {
             transaction.execute(
                 "INSERT INTO governed_local_standing_snapshot
                  (issuance,execution_standing,revision,status,resolved_at,expires_at,currentness,resolution)
@@ -542,6 +618,7 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
         record
             .map(|record| {
                 validate_stored_record(&record)?;
+                validate_local_snapshot(&self.connection, &record)?;
                 Ok(record)
             })
             .transpose()
@@ -745,6 +822,104 @@ fn validate_stored_record(record: &CustodyRecordV1) -> Result<(), String> {
         }
         _ => Err("governed-stored-status-shape".to_owned()),
     }
+}
+
+fn validate_local_snapshot(
+    connection: &Connection,
+    record: &CustodyRecordV1,
+) -> Result<(), String> {
+    let has_mode:i64=connection.query_row("SELECT COUNT(*) FROM pragma_table_info('governed_loop_attempt') WHERE name='local_standing_mode'",[],|r|r.get(0)).map_err(|e|format!("governed-local-standing-mode-schema:{e}"))?;
+    if has_mode == 0 {
+        return Ok(());
+    }
+    let mode: i64 = connection
+        .query_row(
+            "SELECT local_standing_mode FROM governed_loop_attempt WHERE issuance=?1",
+            [&record.issuance.issuance],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("governed-local-standing-mode-read:{e}"))?;
+    let snapshot:Option<(String,u64,String,u64,u64,String,String)>=connection.query_row("SELECT execution_standing,revision,status,resolved_at,expires_at,currentness,resolution FROM governed_local_standing_snapshot WHERE issuance=?1",[&record.issuance.issuance],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|e|format!("governed-local-standing-snapshot-read:{e}"))?;
+    if mode == 0 {
+        if snapshot.is_some() {
+            return Err("governed-historical-standing-has-local-snapshot".to_owned());
+        }
+        return Ok(());
+    }
+    if mode != 1 {
+        return Err("governed-local-standing-mode-corrupt".to_owned());
+    }
+    let (id, revision, status, resolved, expires, currentness, resolution) =
+        snapshot.ok_or_else(|| "governed-local-standing-snapshot-missing".to_owned())?;
+    if id != record.custody.execution_standing
+        || currentness != record.custody.standing_currentness
+        || status != "current"
+    {
+        return Err("governed-local-standing-snapshot-custody-mismatch".to_owned());
+    }
+    let grant:(String,String,String,String,String,String,String,String,u64,u64)=connection.query_row("SELECT operator,campaign,occurrence,program,work_schema,work,subject,scope,issued_at,expires_at FROM local_execution_standing_grant WHERE execution_standing=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).map_err(|e|format!("governed-local-standing-grant-read:{e}"))?;
+    if (
+        grant.1.as_str(),
+        grant.2.as_str(),
+        grant.3.as_str(),
+        grant.4.as_str(),
+        grant.5.as_str(),
+        grant.6.as_str(),
+        grant.7.as_str(),
+        grant.9,
+    ) != (
+        record.issuance.key.campaign.as_str(),
+        record.issuance.key.occurrence.as_str(),
+        record.issuance.program.as_str(),
+        record.issuance.work_schema.as_str(),
+        record.issuance.work.as_str(),
+        record.issuance.subject.as_str(),
+        record.issuance.scope.as_str(),
+        expires,
+    ) || grant.8 > resolved
+    {
+        return Err("governed-local-standing-grant-binding-mismatch".to_owned());
+    }
+    let input = crate::local_execution_standing::GrantInput {
+        operator: &grant.0,
+        campaign: &grant.1,
+        occurrence: &grant.2,
+        program: &grant.3,
+        work_schema: &grant.4,
+        work: &grant.5,
+        subject: &grant.6,
+        scope: &grant.7,
+        issued_at_unix_ms: grant.8,
+        expires_at_unix_ms: grant.9,
+    };
+    if crate::local_execution_standing::grant_identity(&input)? != id {
+        return Err("governed-local-standing-grant-identity".to_owned());
+    }
+    let (revision_status,changed_at,revision_identity):(String,u64,String)=connection.query_row("SELECT status,changed_at,revision_identity FROM local_execution_standing_revision WHERE execution_standing=?1 AND revision=?2",params![id,revision],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|format!("governed-local-standing-revision-read:{e}"))?;
+    let expected_revision = hash_domain(
+        "docket.governed-loop.local-standing-revision/v1",
+        format!("{id}\0{revision}\0{revision_status}\0{changed_at}").as_bytes(),
+    );
+    if revision_status != "current" || revision_identity != expected_revision {
+        return Err("governed-local-standing-revision-mismatch".to_owned());
+    }
+    let expected_currentness = hash_domain(
+        "docket.governed-loop.local-standing-currentness/v1",
+        format!("{id}\0{revision}\0{revision_identity}\0{revision_status}\0{resolved}\0{expires}")
+            .as_bytes(),
+    );
+    let expected_resolution = hash_domain(
+        "docket.governed-loop.local-standing-resolution/v1",
+        format!(
+            "{id}\0{revision}\0{currentness}\0{}\0{resolved}",
+            record.issuance.issuance
+        )
+        .as_bytes(),
+    );
+    if currentness != expected_currentness || resolution != expected_resolution {
+        return Err("governed-local-standing-snapshot-identity".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_stored_indeterminate(
@@ -1495,17 +1670,20 @@ mod tests {
             1150,
         )
         .unwrap();
-        let snapshot = crate::local_execution_standing::inspect_snapshot(
-            &fixture.database,
-            &issuance.issuance,
-        )
-        .unwrap()
-        .unwrap();
+        let snapshot = inspect_local_snapshot(&fixture.database, &issuance.issuance)
+            .unwrap()
+            .unwrap();
         assert_eq!(snapshot.revision, 1);
         assert_eq!(snapshot.status, "current");
         assert_eq!(snapshot.resolved_at_unix_ms, 1100);
         assert_eq!(snapshot.expires_at_unix_ms, 1300);
         assert_eq!(snapshot.currentness, standing.currentness);
+        let changed = Connection::open(&fixture.database).unwrap();
+        changed.execute("UPDATE local_execution_standing_grant SET operator='operator-2' WHERE execution_standing=?1",[&standing.execution_standing]).unwrap();
+        assert_eq!(
+            inspect(&fixture.database, &issuance.issuance).unwrap_err(),
+            "governed-local-standing-grant-identity"
+        );
     }
 
     #[test]

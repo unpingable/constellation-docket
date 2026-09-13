@@ -1,7 +1,9 @@
 //! Resolver process used behind a measured zero-argument deployment launcher.
 
 use gwr_local::local_execution_standing::{read_config, resolve};
-use gwr_runtime::governed_loop::ExecutionStandingRequestV1;
+use gwr_runtime::governed_loop::{
+    validate_issuance, ExecutionStandingRequestV1, STANDING_REQUEST_SCHEMA_V1,
+};
 use std::io::Read as _;
 use std::path::PathBuf;
 
@@ -42,6 +44,10 @@ fn run() -> Result<(), String> {
     }
     let request: ExecutionStandingRequestV1 =
         serde_json::from_slice(&bytes).map_err(|e| format!("local-standing-request:{e}"))?;
+    if request.schema != STANDING_REQUEST_SCHEMA_V1 {
+        return Err("local-standing-request-schema".to_owned());
+    }
+    validate_issuance(&request.issuance)?;
     let response = resolve(&config.state_database, &config.operator, &request)?;
     println!(
         "{}",

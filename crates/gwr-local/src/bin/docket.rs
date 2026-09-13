@@ -419,7 +419,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         ["governed-loop", "standing-snapshot"] => {
             let st=State::open(args)?;
-            let snapshot=local_execution_standing::inspect_snapshot(&st.dir.join("state.sqlite"),&need(args,"--issuance")?)?;
+            let snapshot=governed_loop::inspect_local_snapshot(&st.dir.join("state.sqlite"),&need(args,"--issuance")?)?;
             println!("{}",serde_json::to_string(&snapshot).map_err(|e|format!("local-standing-snapshot-json:{e}"))?);
             Ok(())
         }
@@ -427,6 +427,7 @@ fn run(args: &[String]) -> Result<(), String> {
             local_execution_standing::write_zero_arg_launcher(
                 &PathBuf::from(need(args,"--resolver")?),
                 &PathBuf::from(need(args,"--config")?),
+                &PathBuf::from(need(args,"--python-interpreter")?),
                 &PathBuf::from(need(args,"--output")?),
             )?;
             Ok(())

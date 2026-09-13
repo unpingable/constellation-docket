@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS local_execution_standing_revision (
   revision INTEGER NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('current','revoked','superseded')),
   changed_at INTEGER NOT NULL,
-  currentness TEXT NOT NULL UNIQUE,
+  revision_identity TEXT NOT NULL UNIQUE,
   PRIMARY KEY(execution_standing, revision),
   FOREIGN KEY(execution_standing) REFERENCES local_execution_standing_grant(execution_standing)
 ) STRICT;
