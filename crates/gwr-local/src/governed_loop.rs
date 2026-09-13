@@ -1696,6 +1696,8 @@ mod tests {
         // no longer downgrade it by omitting the assertion flag.
         let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database, false).unwrap();
         assert!(store.require_local_snapshot);
+        let program_digest = digest("program-digest");
+        let binding_bytes=serde_json::to_vec(&serde_json::json!({"plan":issuance.work.clone(),"program_digest":program_digest.clone()})).unwrap();
         store
             .insert_custody(
                 &envelope,
@@ -1703,8 +1705,11 @@ mod tests {
                 &standing,
                 &custody,
                 &ExecutorBindingV1 {
-                    identity: digest("binding"),
-                    program_digest: digest("program-digest"),
+                    identity: hash_domain(
+                        "docket.governed-loop.executor-binding/v1",
+                        &binding_bytes,
+                    ),
+                    program_digest,
                     plan: issuance.work.clone(),
                 },
             )

@@ -99,14 +99,28 @@ fn currentness(
 
 pub fn migrate(connection: &Connection) -> Result<(), String> {
     connection
-        .execute_batch(MIGRATION)
-        .map_err(|e| format!("local-standing-migrate:{e}"))?;
-    let has_attempt:i64=connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='governed_loop_attempt'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-table-check:{e}"))?;
-    let has_mode:i64=connection.query_row("SELECT COUNT(*) FROM pragma_table_info('governed_loop_attempt') WHERE name='local_standing_mode'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-check:{e}"))?;
-    if has_attempt == 1 && has_mode == 0 {
-        connection.execute("ALTER TABLE governed_loop_attempt ADD COLUMN local_standing_mode INTEGER NOT NULL DEFAULT 0 CHECK(local_standing_mode IN (0,1))",[]).map_err(|e|format!("local-standing-mode-add:{e}"))?;
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("local-standing-migrate-lock:{e}"))?;
+    let result = (|| {
+        connection
+            .execute_batch(MIGRATION)
+            .map_err(|e| format!("local-standing-migrate:{e}"))?;
+        let has_attempt:i64=connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='governed_loop_attempt'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-table-check:{e}"))?;
+        let has_mode:i64=connection.query_row("SELECT COUNT(*) FROM pragma_table_info('governed_loop_attempt') WHERE name='local_standing_mode'",[],|r|r.get(0)).map_err(|e|format!("local-standing-mode-check:{e}"))?;
+        if has_attempt == 1 && has_mode == 0 {
+            connection.execute("ALTER TABLE governed_loop_attempt ADD COLUMN local_standing_mode INTEGER NOT NULL DEFAULT 0 CHECK(local_standing_mode IN (0,1))",[]).map_err(|e|format!("local-standing-mode-add:{e}"))?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => connection
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("local-standing-migrate-commit:{e}")),
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 pub fn grant_identity(input: &GrantInput<'_>) -> Result<String, String> {
