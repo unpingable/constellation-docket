@@ -1,5 +1,8 @@
 # Governed Work Runtime (gwr)
 
+Start with the [Docket component guide](docs/public-guide.md) for current
+execution-custody boundaries, entry points, trust premises, and recovery.
+
 A local-first governed work runtime for exact AI-mediated repository effects.
 
 The trusted runtime establishes mechanical facts only; domain modules own semantic

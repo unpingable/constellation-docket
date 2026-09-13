@@ -43,6 +43,10 @@ docket governed-loop standing-revoke --state /absolute/docket-state \
 # standing-supersede accepts the same identity and time arguments.
 ```
 
+These are parameterized command shapes, not a copy-paste current grant. The
+shown numeric timestamps are illustrative and expired; derive fresh monotone
+times for the selected local job without exceeding 300 seconds.
+
 The closed resolver config names the same Docket database, not a second
 authority or consumption ledger:
 
@@ -60,7 +64,9 @@ docket governed-loop standing-write-launcher \
   --output /absolute/fixed/docket-local-standing-launcher
 ```
 
-The enrolled AG Docket port invokes acceptance once. The local-mode flag is an
+The enrolled AG Docket port owns and invokes acceptance once. The command below
+is its process-transport reference, not an instruction to deliver manually
+after or alongside an AG finite run. The local-mode flag is an
 optional setup assertion after enrollment; omitting it cannot downgrade an
 enrolled state database:
 
