@@ -1,8 +1,8 @@
 //! Narrow prospective execution standing for one Docket deployment.
 
 use gwr_runtime::governed_loop::{
-    hash_domain, require_digest, AgIssuanceWireV1, ExecutionStandingRequestV1,
-    ExecutionStandingResolutionV1, ExecutionStandingStatusV1, STANDING_RESOLUTION_SCHEMA_V1,
+    hash_domain, require_digest, ExecutionStandingRequestV1, ExecutionStandingResolutionV1,
+    ExecutionStandingStatusV1, STANDING_RESOLUTION_SCHEMA_V1,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -279,7 +279,7 @@ pub fn resolve(
     if enrolled != operator {
         return Err("local-standing-operator-enrollment-mismatch".to_owned());
     }
-    let mut statement=db.prepare("SELECT g.execution_standing,p.revision,r.status,g.issued_at,g.expires_at,r.revision_identity FROM local_execution_standing_grant g JOIN local_execution_standing_projection p USING(execution_standing) JOIN local_execution_standing_revision r USING(execution_standing,revision) WHERE g.operator=?1 AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4 AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8 LIMIT 2").map_err(|e|format!("local-standing-query-prepare:{e}"))?;
+    let mut statement=db.prepare("SELECT g.execution_standing,p.revision,r.status,g.issued_at,g.expires_at,r.revision_identity,r.changed_at FROM local_execution_standing_grant g JOIN local_execution_standing_projection p USING(execution_standing) JOIN local_execution_standing_revision r USING(execution_standing,revision) WHERE g.operator=?1 AND g.campaign=?2 AND g.occurrence=?3 AND g.program=?4 AND g.work_schema=?5 AND g.work=?6 AND g.subject=?7 AND g.scope=?8 LIMIT 2").map_err(|e|format!("local-standing-query-prepare:{e}"))?;
     let mut rows = statement
         .query(params![
             operator,
@@ -295,13 +295,14 @@ pub fn resolve(
     let Some(row) = rows.next().map_err(|e| format!("local-standing-row:{e}"))? else {
         return Err("local-standing-absent".to_owned());
     };
-    let found: (String, u64, String, u64, u64, String) = (
+    let found: (String, u64, String, u64, u64, String, u64) = (
         row.get(0).map_err(|e| e.to_string())?,
         row.get(1).map_err(|e| e.to_string())?,
         row.get(2).map_err(|e| e.to_string())?,
         row.get(3).map_err(|e| e.to_string())?,
         row.get(4).map_err(|e| e.to_string())?,
         row.get(5).map_err(|e| e.to_string())?,
+        row.get(6).map_err(|e| e.to_string())?,
     );
     if rows
         .next()
@@ -310,7 +311,25 @@ pub fn resolve(
     {
         return Err("local-standing-ambiguous".to_owned());
     }
-    let (id, revision, state, issued, expires, revision_id) = found;
+    let (id, revision, state, issued, expires, revision_id, changed_at) = found;
+    let identity = grant_identity(&GrantInput {
+        operator,
+        campaign: &request.issuance.key.campaign,
+        occurrence: &request.issuance.key.occurrence,
+        program: &request.issuance.program,
+        work_schema: &request.issuance.work_schema,
+        work: &request.issuance.work,
+        subject: &request.issuance.subject,
+        scope: &request.issuance.scope,
+        issued_at_unix_ms: issued,
+        expires_at_unix_ms: expires,
+    })?;
+    if identity != id {
+        return Err("local-standing-grant-identity".to_owned());
+    }
+    if revision_identity(&id, revision, &state, changed_at) != revision_id {
+        return Err("local-standing-revision-identity".to_owned());
+    }
     let status = if state == "revoked" {
         ExecutionStandingStatusV1::Revoked
     } else if state == "superseded" {
@@ -646,6 +665,7 @@ mod tests {
 
     #[test]
     fn measured_launcher_refuses_path_replacement_and_content_mutation() {
+        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
         let positive = database().with_extension("launcher-positive");
         std::fs::create_dir(&positive).unwrap();
         let resolver = positive.join("resolver");
@@ -654,8 +674,7 @@ mod tests {
         std::fs::write(&resolver, b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(&config, b"{}\n").unwrap();
-        write_zero_arg_launcher(&resolver, &config, Path::new("/usr/bin/python3"), &launcher)
-            .unwrap();
+        write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
         assert!(Command::new(&launcher).status().unwrap().success());
         let _ = std::fs::remove_dir_all(positive);
         for target in ["resolver", "config"] {
@@ -669,13 +688,7 @@ mod tests {
                 std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700))
                     .unwrap();
                 std::fs::write(&config, b"{}\n").unwrap();
-                write_zero_arg_launcher(
-                    &resolver,
-                    &config,
-                    Path::new("/usr/bin/python3"),
-                    &launcher,
-                )
-                .unwrap();
+                write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
                 let selected = if target == "resolver" {
                     &resolver
                 } else {
@@ -700,6 +713,7 @@ mod tests {
 
     #[test]
     fn launcher_executes_sealed_captures_after_originals_mutate() {
+        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
         let root = database().with_extension("launcher-sealed-consumption");
         std::fs::create_dir(&root).unwrap();
         let resolver = root.join("resolver");
@@ -709,8 +723,7 @@ mod tests {
         let script=format!("#!/bin/sh\nprintf changed > '{}'\nprintf changed > '{}'\n[ \"$(cat \"$2\")\" = original-config ]\n",resolver.display(),config.display());
         std::fs::write(&resolver, script).unwrap();
         std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
-        write_zero_arg_launcher(&resolver, &config, Path::new("/usr/bin/python3"), &launcher)
-            .unwrap();
+        write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
         assert!(Command::new(&launcher).status().unwrap().success());
         assert_eq!(std::fs::read(&resolver).unwrap(), b"changed");
         assert_eq!(std::fs::read(&config).unwrap(), b"changed");

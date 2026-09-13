@@ -336,7 +336,7 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
         let require_local_snapshot = self.require_local_snapshot || enrolled_now;
         let mut statement = transaction
             .prepare(
-                "SELECT r.revision,r.status,g.issued_at,g.expires_at,r.revision_identity
+                "SELECT r.revision,r.status,g.issued_at,g.expires_at,r.revision_identity,g.operator,r.changed_at
              FROM local_execution_standing_grant g
              JOIN local_execution_standing_revision r USING(execution_standing)
              WHERE g.execution_standing=?1
@@ -364,6 +364,8 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                         row.get::<_, u64>(2)?,
                         row.get::<_, u64>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, u64>(6)?,
                     ))
                 },
             )
@@ -377,6 +379,34 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
             }
             let candidate = candidate
                 .map_err(|error| format!("governed-local-standing-snapshot-row:{error}"))?;
+            let input = crate::local_execution_standing::GrantInput {
+                operator: &candidate.5,
+                campaign: &issuance.key.campaign,
+                occurrence: &issuance.key.occurrence,
+                program: &issuance.program,
+                work_schema: &issuance.work_schema,
+                work: &issuance.work,
+                subject: &issuance.subject,
+                scope: &issuance.scope,
+                issued_at_unix_ms: candidate.2,
+                expires_at_unix_ms: candidate.3,
+            };
+            if crate::local_execution_standing::grant_identity(&input)?
+                != standing.execution_standing
+            {
+                return Err("governed-local-standing-grant-identity".to_owned());
+            }
+            let expected_revision = hash_domain(
+                "docket.governed-loop.local-standing-revision/v1",
+                format!(
+                    "{}\0{}\0{}\0{}",
+                    standing.execution_standing, candidate.0, candidate.1, candidate.6
+                )
+                .as_bytes(),
+            );
+            if expected_revision != candidate.4 {
+                return Err("governed-local-standing-revision-identity".to_owned());
+            }
             let expected = hash_domain(
                 "docket.governed-loop.local-standing-currentness/v1",
                 format!(
@@ -401,7 +431,15 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
         if require_local_snapshot && local_snapshot.is_none() {
             return Err("governed-local-standing-snapshot-required".to_owned());
         }
-        if let Some((revision, status, issued_at, expires_at, revision_identity)) = &local_snapshot
+        if let Some((
+            revision,
+            status,
+            issued_at,
+            expires_at,
+            revision_identity,
+            _operator,
+            _changed_at,
+        )) = &local_snapshot
         {
             if status != "current"
                 || *issued_at > standing.resolved_at_unix_ms
@@ -497,7 +535,15 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                 ],
             )
             .map_err(|error| format!("governed-attempt-insert:{error}"))?;
-        if let Some((revision, status, _issued_at, expires_at, _revision_identity)) = local_snapshot
+        if let Some((
+            revision,
+            status,
+            _issued_at,
+            expires_at,
+            _revision_identity,
+            _operator,
+            _changed_at,
+        )) = local_snapshot
         {
             transaction.execute(
                 "INSERT INTO governed_local_standing_snapshot
@@ -1684,6 +1730,63 @@ mod tests {
             inspect(&fixture.database, &issuance.issuance).unwrap_err(),
             "governed-local-standing-grant-identity"
         );
+    }
+
+    #[test]
+    fn mutated_grant_identity_refuses_before_custody() {
+        let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
+        let input = crate::local_execution_standing::GrantInput {
+            operator: "operator-1",
+            campaign: &fixture.issuance.key.campaign,
+            occurrence: &fixture.issuance.key.occurrence,
+            program: &fixture.issuance.program,
+            work_schema: &fixture.issuance.work_schema,
+            work: &fixture.issuance.work,
+            subject: &fixture.issuance.subject,
+            scope: &fixture.issuance.scope,
+            issued_at_unix_ms: 1000,
+            expires_at_unix_ms: 1300,
+        };
+        crate::local_execution_standing::grant(&fixture.database, &input).unwrap();
+        let standing = crate::local_execution_standing::resolve(
+            &fixture.database,
+            "operator-1",
+            &ExecutionStandingRequestV1 {
+                schema: STANDING_REQUEST_SCHEMA_V1.to_owned(),
+                issuance: fixture.issuance.clone(),
+                now_unix_ms: 1100,
+            },
+        )
+        .unwrap();
+        Connection::open(&fixture.database).unwrap().execute("UPDATE local_execution_standing_grant SET expires_at=1299 WHERE execution_standing=?1",[&standing.execution_standing]).unwrap();
+        let custody =
+            gwr_runtime::governed_loop::make_custody(&fixture.issuance, &standing, 1100).unwrap();
+        let (envelope, issuance) =
+            verify_signed_issuance(&fixture.envelope, &fixture.trust).unwrap();
+        let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database, false).unwrap();
+        let error = store
+            .insert_custody(
+                &envelope,
+                &issuance,
+                &standing,
+                &custody,
+                &ExecutorBindingV1 {
+                    identity: digest("binding"),
+                    program_digest: digest("program"),
+                    plan: issuance.work.clone(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, "governed-local-standing-grant-identity");
+        let count: i64 = Connection::open(&fixture.database)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM governed_execution_standing_use",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
