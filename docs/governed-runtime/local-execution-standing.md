@@ -9,6 +9,10 @@ within 300 seconds and cannot be retimed. Revocation and supersession append
 immutable revisions. The resolver reads the selected revision and returns the
 existing V1 standing response; it never grants on request.
 
+This is a supported Docket component surface. A generic live composition using
+it has not yet been qualified end to end with AG, an enrolled executor, and a
+real operator-owned grant.
+
 Use `docket governed-loop standing-grant` before the AG spend, supplying every
 exact tuple field plus `--operator`, `--issued-at-unix-ms`, and
 `--expires-at-unix-ms`. Use `standing-revoke` or `standing-supersede` with the
@@ -21,6 +25,59 @@ The selected Python interpreter and its standard library remain trusted
 deployment inputs. The launcher generator observes the interpreter hash while
 enrolling, but the generated script's shebang does not reverify the already
 executing interpreter at runtime; deployment enrollment must pin it separately.
+
+## Commands
+
+Prospectively enroll the exact tuple before AG spends:
+
+```sh
+docket governed-loop standing-grant --state /absolute/docket-state \
+  --operator docket-local-operator \
+  --campaign sha256:... --occurrence 00000000-0000-4000-8000-000000000000 \
+  --program sha256:... --work-schema maude.reviewed-local-copy/v1 \
+  --work sha256:... --subject sha256:... --scope sha256:... \
+  --issued-at-unix-ms 1700000000000 --expires-at-unix-ms 1700000300000
+
+docket governed-loop standing-revoke --state /absolute/docket-state \
+  --execution-standing sha256:... --at-unix-ms 1700000001000
+# standing-supersede accepts the same identity and time arguments.
+```
+
+The closed resolver config names the same Docket database, not a second
+authority or consumption ledger:
+
+```json
+{"operator":"docket-local-operator","schema":"docket.governed-loop.local-standing-resolver-config/v1","state_database":"/absolute/docket-state/state.sqlite"}
+```
+
+Generate the create-once launcher using an absolute, nonsymlink interpreter:
+
+```sh
+docket governed-loop standing-write-launcher \
+  --resolver /absolute/bin/docket-local-standing-resolver \
+  --config /absolute/fixed/local-standing-resolver.json \
+  --python-interpreter /absolute/nonsymlink/python3 \
+  --output /absolute/fixed/docket-local-standing-launcher
+```
+
+The enrolled AG Docket port invokes acceptance once. The local-mode flag is an
+optional setup assertion after enrollment; omitting it cannot downgrade an
+enrolled state database:
+
+```sh
+docket governed-loop accept --state /absolute/docket-state \
+  --trust /absolute/fixed/ag-issuer-trust.json \
+  --standing-resolver /absolute/fixed/docket-local-standing-launcher \
+  --executor /absolute/fixed/reviewed-executor \
+  --executor-config /absolute/fixed/reviewed-executor.json \
+  --require-local-standing-snapshot < signed-issuance.json
+
+docket governed-loop standing-snapshot --state /absolute/docket-state \
+  --issuance sha256:...
+```
+
+Snapshot inspection opens only an existing `state.sqlite` read-only. A missing
+state path is an error and is not created or migrated.
 
 The first prospective grant irreversibly enrolls that Docket state database in
 local snapshot-currentness mode and fixes its operator identity and 300-second
