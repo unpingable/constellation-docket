@@ -418,8 +418,8 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("revision: {revision}"); Ok(())
         }
         ["governed-loop", "standing-snapshot"] => {
-            let st=State::open(args)?;
-            let snapshot=governed_loop::inspect_local_snapshot(&st.dir.join("state.sqlite"),&need(args,"--issuance")?)?;
+            let state=PathBuf::from(need(args,"--state")?);
+            let snapshot=governed_loop::inspect_local_snapshot(&state.join("state.sqlite"),&need(args,"--issuance")?)?;
             println!("{}",serde_json::to_string(&snapshot).map_err(|e|format!("local-standing-snapshot-json:{e}"))?);
             Ok(())
         }

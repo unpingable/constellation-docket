@@ -1742,6 +1742,21 @@ mod tests {
     }
 
     #[test]
+    fn local_snapshot_missing_state_is_read_only_absence() {
+        let root = std::env::temp_dir().join(format!(
+            "docket-missing-local-snapshot-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(!root.exists());
+        assert!(
+            inspect_local_snapshot(&root.join("state.sqlite"), &digest("missing-issuance"))
+                .is_err()
+        );
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn mutated_grant_identity_refuses_before_custody() {
         let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
         let input = crate::local_execution_standing::GrantInput {
