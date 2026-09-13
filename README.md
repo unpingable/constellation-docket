@@ -1,28 +1,36 @@
-# Governed Work Runtime (gwr)
+# Docket — constellation-docket
+
+Docket tracks an authorized execution attempt, sends its exact work to an
+executor, and retains the result so an interrupted attempt can be inspected
+and reconciled without blindly running it again.
 
 Start with the [Docket component guide](docs/public-guide.md) for current
 execution-custody boundaries, entry points, trust premises, and recovery.
 
-A local-first governed work runtime for exact AI-mediated repository effects.
+The existing `gwr-*` crate names and `docket` / `gwr-git-broker` command names
+are unchanged.
 
 The trusted runtime establishes mechanical facts only; domain modules own semantic
 judgments; labor providers produce candidate artifacts and untrusted provenance. The
 normative specification lives in `docs/governed-runtime/`.
 
-Docket is **agent-neutral but currently Git-effect-specific**: exactly one effect class
-is admitted — the atomic Git target-ref transition, `GitRefEffect` — and a proposal
-outside it is refused with a typed refusal *before* any standing is issued, any
+The frozen Git-effect baseline admits one effect class: the atomic Git target-ref
+transition, `GitRefEffect`. Within that workflow, a proposal outside it is refused
+with a typed refusal *before* any standing is issued, any
 reservation is created, any dispatch identity is minted, or any provider runs
 ([`effect-classes.md`](docs/governed-runtime/effect-classes.md)). Recovery guarantees
 are properties of that class and its stated premises, not universal Docket guarantees.
+Current source also supports the separate [governed executor transport](docs/governed-runtime/executor-transport-v1.md).
+Its recovery behavior depends on the selected executor and tested composition.
 
 ## Status
 
-Docket is the **governed-execution office** of a four-office constellation:
-Nightshift proposes bounded intent, **AG ng** authorizes the exact prepared
-attempt (one-use authority burn), Docket prepares exact bytes, executes via
-its broker, and settles with evidence, and **NQ** evaluates the exported
-dossier against registered claims and consumer reliance. Docket owns both
+In Constellation's supported governed paths, Nightshift records observations and
+proposals, `constellation-ag` authorizes exact bounded work, and Docket owns the
+attempt and its execution records. `constellation-nq` supplies profile-specific
+evidence admission and checks; the selected composition determines where those
+checks apply. A settled attempt is not necessarily successful and does not grant
+permission for another run. Docket retains the older
 authorization wire contracts (`gwr:authz-request:v1`, `ag.docket-issuance:v1`)
 and their conformance vectors; it does not own authorization policy, claim
 admissibility, or orchestration posture — and its own reliance bridge refuses
