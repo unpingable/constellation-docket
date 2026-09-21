@@ -19,10 +19,13 @@ used by separately implemented executors. That transport does not make every
 executor or composition recoverable; each executor retains its own plan,
 mechanics, receipt, and reconciliation law.
 
-The Docket-local prospective-standing component surface is implemented and
-tested. A generic live AG/Docket/executor composition using it has not yet been
-qualified. See the [local standing guide](governed-runtime/local-execution-standing.md)
-and the public [Constellation Integration guide](https://unpingable.com/constellation/integration.html).
+The Docket-local execution-permission surface is implemented and tested. The
+immutable [0.1.0-alpha.6 `reviewed-local-copy/v1` profile](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html)
+qualified one exact AG/Docket/executor composition using it: a reviewed,
+one-use permission bound to a harmless local copy, followed by custody and
+reconciliation. It does not qualify a generic executor or deployment. See the
+[local standing guide](governed-runtime/local-execution-standing.md) and the
+public [Constellation Integration guide](https://unpingable.com/constellation/integration.html).
 
 ## Build and inspect
 

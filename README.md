@@ -25,6 +25,14 @@ Its recovery behavior depends on the selected executor and tested composition.
 
 ## Status
 
+The current immutable Constellation integration release is
+[0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
+Its `reviewed-local-copy/v1` profile qualified one real reviewed, AG-authorized
+one-use local effect under Docket custody and reconciliation. Public newcomers
+reproduced the retained evidence from anonymous clones without repeating the
+provider call or effect. This is a narrow profile, not a promise that every
+executor, effect class, or deployment has the same qualification.
+
 In Constellation's supported governed paths, Nightshift records observations and
 proposals, `constellation-ag` authorizes exact bounded work, and Docket owns the
 attempt and its execution records. `constellation-nq` supplies profile-specific
@@ -80,7 +88,7 @@ might expect to be enforced are deliberately written down there as premises inst
 | What each outcome means and what to do next | [`operator-runbook.md`](docs/governed-runtime/operator-runbook.md) |
 | First upstream-authorized governed change | [`vertical-01.md`](docs/vertical-01.md) |
 | How upstream authorization becomes local standing | [`upstream-authorization.md`](docs/governed-runtime/upstream-authorization.md) |
-| Prospective Docket-local governed-loop standing | [`local-execution-standing.md`](docs/governed-runtime/local-execution-standing.md) |
+| Docket-local execution permission and the alpha.6-qualified use | [`local-execution-standing.md`](docs/governed-runtime/local-execution-standing.md) · [alpha.6 walkthrough](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html) |
 
 Documents cite an external "normative packet" as their requirements source. That packet is
 held privately and is not part of this repository; the citations are to an external source,
