@@ -19,6 +19,8 @@ pub const INSPECTION_SCHEMA_V1: &str = "docket.governed-loop.inspection/v1";
 pub const EXECUTOR_TRANSPORT_SCHEMA_V1: &str = "docket.governed-executor-transport/v1";
 /// Canonical external identity of the closed, untagged V1 dispatch shape.
 pub const EXECUTOR_DISPATCH_SCHEMA_V1: &str = "docket.governed-executor-dispatch/v1";
+/// Authorization-carrying dispatch for executors that verify AG at mutation time.
+pub const EXECUTOR_DISPATCH_SCHEMA_V2: &str = "docket.governed-executor-dispatch/v2";
 /// Canonical external identity of the closed, untagged V1 outcome shape.
 pub const EXECUTOR_OUTCOME_SCHEMA_V1: &str = "docket.governed-executor-outcome/v1";
 /// Exact V1 bound for an executor stdin dispatch or stdout outcome document.
@@ -144,6 +146,15 @@ pub struct ExecutorDispatchWireV1 {
     pub work: String,
     pub subject: String,
     pub scope: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedExecutorDispatchWireV2 {
+    pub schema: String,
+    pub signed_issuance: SignedIssuanceEnvelopeWireV1,
+    pub custody: DocketCustodyWireV1,
+    pub dispatch: ExecutorDispatchWireV1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

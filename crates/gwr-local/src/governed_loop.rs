@@ -11,17 +11,17 @@ use gwr_runtime::governed_loop::{
     digest_json_string, hash_domain, require_digest, validate_issuance,
 };
 pub use gwr_runtime::governed_loop::{
-    AgIssuanceWireV1, AgIssuerTrustConfigV1, CustodyRecordV1, DocketCustodyWireV1,
-    DocketReconciliationWireV1, DocketSettlementWireV1, ExecutionStandingRequestV1,
-    ExecutionStandingResolutionV1, ExecutionStandingStatusV1, ExecutorBindingV1,
-    ExecutorDispatchWireV1, ExecutorOutcomeClassWireV1, ExecutorOutcomeWireV1,
+    AgIssuanceWireV1, AgIssuerTrustConfigV1, AuthorizedExecutorDispatchWireV2, CustodyRecordV1,
+    DocketCustodyWireV1, DocketReconciliationWireV1, DocketSettlementWireV1,
+    ExecutionStandingRequestV1, ExecutionStandingResolutionV1, ExecutionStandingStatusV1,
+    ExecutorBindingV1, ExecutorDispatchWireV1, ExecutorOutcomeClassWireV1, ExecutorOutcomeWireV1,
     GovernedLoopInspectionV1, GovernedRecordInspectionV1, GovernedRecordStatusV1,
     IndeterminateOutcomeWireV1, IssuanceAuthenticationWireV1, KnownOutcomeWireV1,
     OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1, TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1,
-    CUSTODY_SCHEMA_V1, EXECUTOR_DISPATCH_SCHEMA_V1, EXECUTOR_OUTCOME_SCHEMA_V1,
-    EXECUTOR_TRANSPORT_SCHEMA_V1, INSPECTION_SCHEMA_V1, MAX_EXECUTOR_DOCUMENT_BYTES,
-    SETTLEMENT_SCHEMA_V1, SIGNED_ISSUANCE_SCHEMA_V1, STANDING_REQUEST_SCHEMA_V1,
-    STANDING_RESOLUTION_SCHEMA_V1,
+    CUSTODY_SCHEMA_V1, EXECUTOR_DISPATCH_SCHEMA_V1, EXECUTOR_DISPATCH_SCHEMA_V2,
+    EXECUTOR_OUTCOME_SCHEMA_V1, EXECUTOR_TRANSPORT_SCHEMA_V1, INSPECTION_SCHEMA_V1,
+    MAX_EXECUTOR_DOCUMENT_BYTES, SETTLEMENT_SCHEMA_V1, SIGNED_ISSUANCE_SCHEMA_V1,
+    STANDING_REQUEST_SCHEMA_V1, STANDING_RESOLUTION_SCHEMA_V1,
 };
 use gwr_runtime::ports::governed_loop::{
     ExecutionStandingResolverV1, GovernedClockV1, GovernedCustodyStoreV1, GovernedExecutorV1,
@@ -172,35 +172,47 @@ impl GovernedExecutorV1 for LocalGovernedExecutorV1<'_> {
         require_executor_binding(self.program, self.config, expected)
     }
 
-    fn execute(
+    fn execute_authorized(
         &mut self,
+        envelope: &SignedIssuanceEnvelopeWireV1,
+        custody: &DocketCustodyWireV1,
         dispatch: &ExecutorDispatchWireV1,
     ) -> Result<ExecutorOutcomeWireV1, String> {
-        self.invoke("execute", dispatch)
+        self.invoke_authorized("execute", envelope, custody, dispatch)
     }
 
-    fn reconcile(
+    fn reconcile_authorized(
         &mut self,
+        envelope: &SignedIssuanceEnvelopeWireV1,
+        custody: &DocketCustodyWireV1,
         dispatch: &ExecutorDispatchWireV1,
     ) -> Result<ExecutorOutcomeWireV1, String> {
-        self.invoke("reconcile", dispatch)
+        self.invoke_authorized("reconcile", envelope, custody, dispatch)
     }
 }
 
 impl LocalGovernedExecutorV1<'_> {
-    fn invoke(
+    fn invoke_authorized(
         &self,
         operation: &str,
+        envelope: &SignedIssuanceEnvelopeWireV1,
+        custody: &DocketCustodyWireV1,
         dispatch: &ExecutorDispatchWireV1,
     ) -> Result<ExecutorOutcomeWireV1, String> {
         let config = self
             .config
             .to_str()
             .ok_or_else(|| "executor-config-path-not-utf8".to_owned())?;
+        let authorized = AuthorizedExecutorDispatchWireV2 {
+            schema: EXECUTOR_DISPATCH_SCHEMA_V2.to_owned(),
+            signed_issuance: envelope.clone(),
+            custody: custody.clone(),
+            dispatch: dispatch.clone(),
+        };
         invoke_json(
             self.program,
             &[operation, config],
-            dispatch,
+            &authorized,
             MAX_EXECUTOR_DOCUMENT_BYTES,
         )
     }
@@ -1086,6 +1098,49 @@ mod tests {
     }
 
     #[test]
+    fn local_executor_receives_exact_authenticated_issuance_custody_and_dispatch() {
+        let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
+        accept(
+            &fixture.database,
+            &fixture.envelope,
+            &fixture.trust,
+            &fixture.standing_program,
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+        )
+        .unwrap();
+
+        let input = std::fs::read(fixture.executor_program.with_extension("last-input")).unwrap();
+        let delivered: AuthorizedExecutorDispatchWireV2 = serde_json::from_slice(&input).unwrap();
+        let expected_envelope: SignedIssuanceEnvelopeWireV1 =
+            serde_json::from_slice(&fixture.envelope).unwrap();
+        assert_eq!(delivered.schema, EXECUTOR_DISPATCH_SCHEMA_V2);
+        assert_eq!(delivered.signed_issuance, expected_envelope);
+        assert_eq!(delivered.custody.schema, fixture.custody.schema);
+        assert_eq!(delivered.custody.issuance, fixture.custody.issuance);
+        assert_eq!(delivered.custody.ag_spend, fixture.custody.ag_spend);
+        assert_eq!(
+            delivered.custody.execution_standing,
+            fixture.custody.execution_standing
+        );
+        assert_eq!(
+            delivered.custody.standing_currentness,
+            fixture.custody.standing_currentness
+        );
+        assert_eq!(delivered.custody.attempt, fixture.custody.attempt);
+        assert_eq!(
+            delivered.custody.executor_marker,
+            fixture.custody.executor_marker
+        );
+        assert!(delivered.custody.accepted_at_unix_ms > 0);
+        assert_eq!(delivered.dispatch.attempt, fixture.custody.attempt);
+        assert_eq!(delivered.dispatch.marker, fixture.custody.executor_marker);
+        assert_eq!(delivered.dispatch.work, fixture.issuance.work);
+        assert_eq!(delivered.dispatch.subject, fixture.issuance.subject);
+        assert_eq!(delivered.dispatch.scope, fixture.issuance.scope);
+    }
+
+    #[test]
     fn read_only_inspection_retains_issuer_custody_and_outcome_without_mutation() {
         let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
         let accepted = accept(
@@ -1784,16 +1839,18 @@ mod tests {
         .unwrap();
         let response = path.with_extension("response");
         let invocations = path.with_extension("invocations");
+        let input = path.with_extension("last-input");
         std::fs::write(&response, output).unwrap();
         if path.exists() {
             return;
         }
         let response = response.display().to_string().replace('\'', "'\\''");
         let invocations = invocations.display().to_string().replace('\'', "'\\''");
+        let input = input.display().to_string().replace('\'', "'\\''");
         std::fs::write(
             path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = plan-id ]; then cat \"$2\"; exit $?; fi\nif [ \"$1\" = execute ]; then cat >/dev/null; printf x >> '{invocations}'; cat '{response}'; exit $?; fi\nif [ \"$1\" = reconcile ]; then cat >/dev/null; cat '{response}'; exit $?; fi\nexit 64\n"
+                "#!/bin/sh\nif [ \"$1\" = plan-id ]; then cat \"$2\"; exit $?; fi\nif [ \"$1\" = execute ]; then cat > '{input}'; printf x >> '{invocations}'; cat '{response}'; exit $?; fi\nif [ \"$1\" = reconcile ]; then cat > '{input}'; cat '{response}'; exit $?; fi\nexit 64\n"
             ),
         )
         .unwrap();

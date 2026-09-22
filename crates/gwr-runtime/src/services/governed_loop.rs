@@ -62,7 +62,7 @@ where
         return Ok(custody);
     }
     let dispatch = executor_dispatch(issuance, &custody);
-    match executor.execute(&dispatch) {
+    match executor.execute_authorized(envelope, &custody, &dispatch) {
         Ok(outcome) => record_executor_outcome(
             store,
             &issuance.issuance,
@@ -111,7 +111,12 @@ where
         plan: record.executor_plan.clone(),
     })?;
     let dispatch = executor_dispatch(&record.issuance, &record.custody);
-    match executor.reconcile(&dispatch) {
+    let envelope = SignedIssuanceEnvelopeWireV1 {
+        schema: crate::governed_loop::SIGNED_ISSUANCE_SCHEMA_V1.to_owned(),
+        body_b64: record.signed_body_b64.clone(),
+        authentication: record.authentication.clone(),
+    };
+    match executor.reconcile_authorized(&envelope, &record.custody, &dispatch) {
         Ok(outcome) => record_executor_outcome(
             store,
             issuance,

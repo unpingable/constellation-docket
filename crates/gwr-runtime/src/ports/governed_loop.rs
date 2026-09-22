@@ -47,13 +47,17 @@ pub trait GovernedExecutorV1 {
 
     fn require_binding(&mut self, expected: &ExecutorBindingV1) -> Result<(), String>;
 
-    fn execute(
+    fn execute_authorized(
         &mut self,
+        envelope: &SignedIssuanceEnvelopeWireV1,
+        custody: &DocketCustodyWireV1,
         dispatch: &ExecutorDispatchWireV1,
     ) -> Result<ExecutorOutcomeWireV1, String>;
 
-    fn reconcile(
+    fn reconcile_authorized(
         &mut self,
+        envelope: &SignedIssuanceEnvelopeWireV1,
+        custody: &DocketCustodyWireV1,
         dispatch: &ExecutorDispatchWireV1,
     ) -> Result<ExecutorOutcomeWireV1, String>;
 }
