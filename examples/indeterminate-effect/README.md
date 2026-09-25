@@ -3,16 +3,27 @@
 An agent asks for a refund at a payment provider. The request goes out, and the
 reply never comes back. The agent's command exits 0, and the agent reports
 "Done." Docket, the component that keeps custody of each attempt, records the
-attempt as **indeterminate**: not success, not failure. It does not retry,
-because a retry could refund twice. Later, a separate observer asks the
-provider what is actually in its ledger, and only then does Docket settle the
-attempt.
+attempt as **indeterminate**: not success, not failure. It does not send the
+request again, even with an idempotency key: an authorization is spent once,
+and a second write is a second effect. Docket settles the attempt only on the
+answer of the executor's `reconcile` step, which must read and never write. In
+this demo that step asks the provider's ledger directly, through a separate
+observer.
 
 The demo runs this twice with the same agent and the same "Done." In run A
 the provider's reply is lost, so the refund really happened and Docket settles
 **success**. In run B the request itself is lost, so the refund never happened,
 and after the provider's deadline has passed Docket settles **failure**. The
 agent's message cannot tell these cases apart. The provider's records can.
+
+The two usual rules both fail here. "A network error means failure" is wrong in
+run A, where the refund had already applied. "Retry with the idempotency key"
+resolves the question with a second write under an authorization that has
+already been spent.
+
+Docket is real and built from source. The authorizing service, the payment
+provider, the network fault and the agent are small local stand-ins (see
+[Limits](#limits)).
 
 ## Run it
 
@@ -30,9 +41,10 @@ cd constellation-docket
 `run.sh` builds the two Docket binaries from this checkout with the pinned Rust
 toolchain (`rust-toolchain.toml`, 1.94.0; rustup fetches it on first use), runs
 the demo, then runs the independent check. On a fresh 4-core Debian 12 VM the
-whole path took about three minutes: 80 s for the packages, 12 s for rustup,
-the toolchain and the crates, 54 s for the build, and 10 s for the demo, most of
-which is waiting for run B's deadline. Network access is needed only for the
+whole path took about 2 minutes 20 seconds after boot (qualifying run
+2026-09-25): 66 s for the packages, 12 s for rustup, the toolchain and the
+crates, 51 s for the build, and 11 s for the demo and check, most of which is
+waiting for run B's deadline. Network access is needed only for the
 packages, the toolchain, the clone and the crates.io dependencies. The build
 and the demo also run with the network cut off; the demo uses only 127.0.0.1.
 
