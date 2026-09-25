@@ -179,6 +179,10 @@ def scenario(run: pathlib.Path, name: str, docket: str | None, repo_vectors: pat
             f"{issuance}:{attempt}:{settlement['receipt']}:{settlement['outcome']}".encode()),
             "settlement digest recomputes")
         check(final["indeterminate"] == first["indeterminate"], "the earlier indeterminate evidence is retained")
+        used = observations.get(settlement["receipt"])
+        check(used is not None and claim["claimed_at_unix_ms"] <= used["asked_at_unix_ms"]
+              <= settlement["settled_at_unix_ms"],
+              "order: agent's claim, then the observer's lookup, then the settlement")
     program = hash_domain("docket.governed-loop.executor-program/v1",
                           (pathlib.Path(__file__).resolve().parent / "bin" / "refund-executor").read_bytes())
     check(final["executor_program_digest"] == program, "the executor Docket ran is this repository's bin/refund-executor")
