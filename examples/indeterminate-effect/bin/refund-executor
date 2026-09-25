@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Docket executor for one refund request (docket.governed-executor-transport/v1).
+
+  refund-executor plan-id   CONFIG   print the sealed plan's identity
+  refund-executor execute   CONFIG   send the refund once; report what is known
+  refund-executor reconcile CONFIG   ask the observer; never sends anything
+
+`execute` reports `success` only when it holds the provider's reply,
+`failure` only when the provider refused, and `indeterminate` otherwise.
+
+`reconcile` does not read this executor's own journal. It runs the separate
+observer program, which asks the provider directly, and maps the observer's
+document to an outcome by one fixed rule:
+
+  provider has the exact request committed            -> success
+  provider lacks it and its deadline has passed       -> failure
+  anything else                                       -> indeterminate
+"""
+import hashlib
+import http.client
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.parse
+
+WORK_SCHEMA = "example.refund-request/v1"
+
+
+def canonical(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def sha(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def refuse(message: str) -> None:
+    sys.stderr.write(message + "\n")
+    sys.exit(2)
+
+
+operation, config_path = sys.argv[1], sys.argv[2]
+config = json.loads(pathlib.Path(config_path).read_text())
+plan = config["plan"]
+plan_id = sha(canonical(plan))
+
+if operation == "plan-id":
+    print(plan_id)
+    sys.exit(0)
+
+dispatch = json.loads(sys.stdin.read())
+if dispatch["work"] != plan_id or dispatch["work_schema"] != WORK_SCHEMA:
+    refuse("dispatch does not name this sealed plan")
+# The provider request: the sealed plan plus Docket's per-attempt marker as the idempotency key.
+request = {"schema": plan["schema"], "order": plan["order"], "amount_cents": plan["amount_cents"],
+           "currency": plan["currency"], "apply_before_unix_ms": plan["apply_before_unix_ms"],
+           "idempotency_key": dispatch["marker"]}
+
+
+def answer(outcome: str, receipt: str) -> None:
+    sys.stdout.write(canonical({"attempt": dispatch["attempt"], "marker": dispatch["marker"],
+                                "receipt": receipt, "outcome": outcome}).decode() + "\n")
+
+
+def post(url: str, body: dict):
+    parts = urllib.parse.urlsplit(url)
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=config["reply_timeout_s"])
+    try:
+        data = canonical(body)
+        connection.request("POST", parts.path, body=data, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+if operation == "execute":
+    journal = pathlib.Path(config["journal_dir"])
+    journal.mkdir(parents=True, exist_ok=True)
+    reservation = journal / (dispatch["marker"][7:] + ".reservation.json")
+    try:
+        fd = os.open(reservation, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        refuse("this attempt was already sent once; use reconcile")
+    os.write(fd, canonical({"dispatch": dispatch, "request": request, "reserved_at_unix_ms": now_ms()}))
+    os.fsync(fd)
+    os.close(fd)
+    sent_at = now_ms()
+    try:
+        status, body = post(config["send_url"] + "/v1/refunds", request)
+    except (OSError, http.client.HTTPException) as error:
+        evidence = canonical({"schema": "example.refund-executor.no-reply/v1", "attempt": dispatch["attempt"],
+                              "marker": dispatch["marker"], "request_id": sha(canonical(request)),
+                              "sent_at_unix_ms": sent_at, "gave_up_at_unix_ms": now_ms(),
+                              "error": f"{type(error).__name__}: {error}"})
+        (journal / (dispatch["marker"][7:] + ".no-reply.json")).write_bytes(evidence)
+        answer("indeterminate", sha(evidence))
+        sys.exit(0)
+    (journal / (dispatch["marker"][7:] + f".reply-{status}.json")).write_bytes(body)
+    if status in (200, 201):
+        answer("success", sha(body))
+    elif status == 409:
+        answer("failure", sha(body))
+    else:
+        refuse(f"provider answered {status}")
+elif operation == "reconcile":
+    done = subprocess.run([config["observer"], "--provider-url", config["observer_provider_url"],
+                           "--out-dir", config["observations_dir"]],
+                          input=canonical(request), capture_output=True, timeout=30)
+    if done.returncode != 0:
+        refuse("observer failed: " + done.stderr.decode(errors="replace")[:400])
+    observation = json.loads(done.stdout)
+    seen = observation["provider_answer"]
+    if seen["request_id"] != sha(canonical(request)):
+        refuse("observer looked up a different request")
+    if seen["state"] == "committed":
+        answer("success", sha(done.stdout))
+    elif seen["state"] == "absent" and seen["can_still_apply"] is False:
+        answer("failure", sha(done.stdout))
+    else:
+        answer("indeterminate", sha(done.stdout))
+else:
+    refuse("unknown operation")

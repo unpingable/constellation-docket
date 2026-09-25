@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Independent observer: asks the provider whether one exact request was applied.
+
+Reads the canonical provider request on stdin, calls the provider's read-only
+lookup endpoint directly (not through the worker's network link), and writes
+the provider's answer, unmodified, into an observation document. It prints the
+document and also keeps a copy named by its sha256 in --out-dir.
+
+It never reads the agent's claim, the executor's journal, the network log or
+Docket's records, and it makes no judgement: it only records what the provider
+says.
+"""
+import argparse
+import hashlib
+import json
+import pathlib
+import sys
+import time
+import urllib.request
+
+
+def canonical(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--provider-url", required=True)
+parser.add_argument("--out-dir", required=True, type=pathlib.Path)
+args = parser.parse_args()
+request = json.loads(sys.stdin.buffer.read())
+lookup = urllib.request.Request(args.provider_url + "/v1/refunds/lookup", data=canonical(request),
+                                headers={"Content-Type": "application/json"}, method="POST")
+asked_at = time.time_ns() // 1_000_000
+with urllib.request.urlopen(lookup, timeout=10) as response:
+    raw = response.read()
+document = canonical({"schema": "example.refund-observation/v1", "observer": "observe",
+                      "asked_at_unix_ms": asked_at, "lookup_url": args.provider_url + "/v1/refunds/lookup",
+                      "request": request, "provider_answer": json.loads(raw),
+                      "provider_answer_sha256": hashlib.sha256(raw).hexdigest()})
+args.out_dir.mkdir(parents=True, exist_ok=True)
+(args.out_dir / (hashlib.sha256(document).hexdigest() + ".json")).write_bytes(document)
+sys.stdout.buffer.write(document)
