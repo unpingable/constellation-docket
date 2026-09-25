@@ -33,7 +33,7 @@ On Debian 12 (other Linux distributions work with equivalent packages):
 sudo apt-get install -y git curl gcc libc6-dev python3 openssl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
 . "$HOME/.cargo/env"
-git clone -b campaign/public-demo-20260925 https://github.com/unpingable/constellation-docket.git
+git clone -b demo/indeterminate-effect-20260925 https://github.com/unpingable/constellation-docket.git
 cd constellation-docket
 ./examples/indeterminate-effect/run.sh
 ```
@@ -133,6 +133,11 @@ and the check fails.
   shows the case where the worker cannot know.
 - **The provider, the network fault and the agent are small local stand-ins.**
   Everything runs on one host, under one clock and one user account.
-- **This is the demo branch, not a release.** It builds Docket from source at
-  this commit (the `alpha-exit-packaging` line, `3093def` plus this
-  directory). It is not the packaged Docket 0.1.0 artifact.
+- **This is a qualified public exhibit, not a Docket release.** The tag
+  `demo/indeterminate-effect-20260925` is the exhibit's identity. It builds
+  Docket from source at this commit: the `alpha-exit-packaging` line at
+  `3093def` plus this directory. That source basis matches the pinned Docket
+  0.1.0 release-candidate artifact (`6596315f…`), but this is not that
+  artifact, and the tag is not a release or cohort promotion. The code in this
+  directory is byte-identical to the cold-clone qualification run (run-003 at
+  `9ebdc5e`); only this README changed since.
