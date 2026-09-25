@@ -21,8 +21,10 @@ measured zero-argument launcher with `standing-write-launcher`; it captures the
 resolver and closed static config from nonsymlink regular files, checks their
 enrolled hashes, seals both memfds against content and size changes, and then
 executes and reads only those sealed captures.
-The selected Python interpreter and its standard library remain trusted
-deployment inputs. The launcher generator observes the interpreter hash while
+The launcher runs under `python -IS` (isolated mode without `site`), so no
+user or system site-packages directory and no `.pth` hook is loaded; it uses
+only the standard library. The selected Python interpreter and its standard
+library remain trusted deployment inputs. The launcher generator observes the interpreter hash while
 enrolling, but the generated script's shebang does not reverify the already
 executing interpreter at runtime; deployment enrollment must pin it separately.
 

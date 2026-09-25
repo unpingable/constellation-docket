@@ -463,7 +463,7 @@ pub fn write_zero_arg_launcher(
     )
     .map_err(|e| e.to_string())?;
     let body = format!(
-        r##"#!{py} -I
+        r##"#!{py} -IS
 import fcntl,hashlib,os,stat,sys
 if len(sys.argv)!=1: raise SystemExit("local standing launcher accepts no arguments")
 def capture(path,want,maximum,name,executable):
@@ -607,6 +607,12 @@ mod tests {
         write_zero_arg_launcher(resolver, config, python, &written).unwrap();
         let metadata = std::fs::metadata(&written).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        let body = std::fs::read_to_string(&written).unwrap();
+        assert_eq!(
+            body.lines().next(),
+            Some(format!("#!{} -IS", python.display()).as_str()),
+            "isolated mode without site: no user or system site-packages and no .pth hooks"
+        );
         assert!(
             write_zero_arg_launcher(resolver, config, python, &written).is_err(),
             "the launcher writer is create-once"
