@@ -57,6 +57,8 @@ Usage:
   docket <command> [options]
   docket --help
   docket -h
+  docket --version
+  docket --build-info
 
 Put the command before its options. Every stateful command requires
 --state <directory>; Docket creates an empty state directory on first use.
@@ -114,6 +116,9 @@ Source installation and clean-state bootstrap:
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if gwr_local::build_info::answer_identity_request("docket", &args) {
+        return;
+    }
     match run(&args) {
         Ok(()) => {}
         Err(e) => {

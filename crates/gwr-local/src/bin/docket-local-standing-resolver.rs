@@ -16,9 +16,12 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if gwr_local::build_info::answer_identity_request("docket-local-standing-resolver", &args) {
+        return Ok(());
+    }
     let [flag, value] = args.as_slice() else {
         return Err(
-            "usage: docket-local-standing-resolver --config ABSOLUTE_PATH | --config-fd 3"
+            "usage: docket-local-standing-resolver --config ABSOLUTE_PATH | --config-fd 3 | --version | --build-info"
                 .to_owned(),
         );
     };
