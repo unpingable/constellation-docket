@@ -599,6 +599,62 @@ mod tests {
         }
     }
 
+    /// Generates the launcher with the production writer, then installs the
+    /// exact bytes at `launcher` out of process (see `crate::test_support`),
+    /// so no sibling test's fork can leave a writer on the executed inode.
+    fn install_launcher(resolver: &Path, config: &Path, python: &Path, launcher: &Path) {
+        let written = launcher.with_extension("written");
+        write_zero_arg_launcher(resolver, config, python, &written).unwrap();
+        let metadata = std::fs::metadata(&written).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(
+            write_zero_arg_launcher(resolver, config, python, &written).is_err(),
+            "the launcher writer is create-once"
+        );
+        crate::test_support::write_executable(launcher, &std::fs::read(&written).unwrap());
+    }
+
+    /// Regression for the pre-existing ETXTBSY flake: executing freshly
+    /// generated launchers while sibling threads continuously fork children
+    /// must never fail with "Text file busy".
+    #[test]
+    fn launcher_executes_while_sibling_threads_fork() {
+        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
+        let root = database().with_extension("launcher-fork-pressure");
+        std::fs::create_dir(&root).unwrap();
+        let resolver = root.join("resolver");
+        let config = root.join("config");
+        std::fs::write(&resolver, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&config, b"{}\n").unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = Command::new("/bin/true").status();
+                    }
+                })
+            })
+            .collect();
+        let mut failures = Vec::new();
+        for n in 0..25 {
+            let launcher = root.join(format!("launcher-{n}"));
+            install_launcher(&resolver, &config, &python, &launcher);
+            match Command::new(&launcher).status() {
+                Ok(status) if status.success() => {}
+                other => failures.push(format!("{n}: {other:?}")),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(root);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     #[test]
     fn current_then_revoked_preserves_distinct_immutable_revision() {
         let db = database();
@@ -685,7 +741,7 @@ mod tests {
         std::fs::write(&resolver, b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(&config, b"{}\n").unwrap();
-        write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
+        install_launcher(&resolver, &config, &python, &launcher);
         assert!(Command::new(&launcher).status().unwrap().success());
         let _ = std::fs::remove_dir_all(positive);
         for target in ["resolver", "config"] {
@@ -699,7 +755,7 @@ mod tests {
                 std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700))
                     .unwrap();
                 std::fs::write(&config, b"{}\n").unwrap();
-                write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
+                install_launcher(&resolver, &config, &python, &launcher);
                 let selected = if target == "resolver" {
                     &resolver
                 } else {
@@ -734,7 +790,7 @@ mod tests {
         let script=format!("#!/bin/sh\nprintf changed > '{}'\nprintf changed > '{}'\n[ \"$(cat \"$2\")\" = original-config ]\n",resolver.display(),config.display());
         std::fs::write(&resolver, script).unwrap();
         std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o700)).unwrap();
-        write_zero_arg_launcher(&resolver, &config, &python, &launcher).unwrap();
+        install_launcher(&resolver, &config, &python, &launcher);
         assert!(Command::new(&launcher).status().unwrap().success());
         assert_eq!(std::fs::read(&resolver).unwrap(), b"changed");
         assert_eq!(std::fs::read(&config).unwrap(), b"changed");

@@ -1294,7 +1294,6 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair as _};
     use sha2::Digest as _;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
@@ -2346,16 +2345,13 @@ mod tests {
         }
         let response = response.display().to_string().replace('\'', "'\\''");
         let invocations = invocations.display().to_string().replace('\'', "'\\''");
-        std::fs::write(
+        crate::test_support::write_executable(
             path,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = plan-id ]; then cat \"$2\"; exit $?; fi\nif [ \"$1\" = execute ]; then cat >/dev/null; printf x >> '{invocations}'; cat '{response}'; exit $?; fi\nif [ \"$1\" = reconcile ]; then cat >/dev/null; cat '{response}'; exit $?; fi\nexit 64\n"
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(path, permissions).unwrap();
+            )
+            .as_bytes(),
+        );
     }
 
     /// Like a real resolver, stamps `resolved_at_unix_ms` with the request's
@@ -2368,50 +2364,37 @@ mod tests {
         let (before, after) = json.split_once("\"resolved_at_unix_ms\":0").unwrap();
         let before = format!("{before}\"resolved_at_unix_ms\":").replace('\'', "'\\''");
         let after = after.replace('\'', "'\\''");
-        std::fs::write(
+        crate::test_support::write_executable(
             path,
             format!(
                 "#!/bin/sh\nnow=$(tr -d '\\n' | sed -n 's/.*\"now_unix_ms\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$now\" ] || now=$(date +%s%3N)\nprintf '%s%s%s' '{before}' \"$now\" '{after}'\n"
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(path, permissions).unwrap();
+            )
+            .as_bytes(),
+        );
     }
 
     fn write_static_program(path: &Path, output: &str) {
         let escaped = output.replace('\'', "'\\''");
-        std::fs::write(
+        crate::test_support::write_executable(
             path,
-            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{escaped}'\n"),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(path, permissions).unwrap();
+            format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{escaped}'\n").as_bytes(),
+        );
     }
 
     fn write_mutating_static_program(path: &Path, output: &str, mutated: &Path) {
         let escaped = output.replace('\'', "'\\''");
         let mutated = mutated.display().to_string().replace('\'', "'\\''");
-        std::fs::write(
+        crate::test_support::write_executable(
             path,
             format!(
                 "#!/bin/sh\ncat >/dev/null\nprintf '\\n# changed-after-reservation\\n' >> '{mutated}'\nprintf '%s' '{escaped}'\n"
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(path, permissions).unwrap();
+            )
+            .as_bytes(),
+        );
     }
 
     fn write_refusing_program(path: &Path) {
-        std::fs::write(path, "#!/bin/sh\nexit 77\n").unwrap();
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(path, permissions).unwrap();
+        crate::test_support::write_executable(path, "#!/bin/sh\nexit 77\n".as_bytes());
     }
 
     fn b64_encode(bytes: &[u8]) -> String {

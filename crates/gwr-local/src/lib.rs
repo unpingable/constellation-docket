@@ -16,5 +16,7 @@ pub mod providers;
 pub mod recover;
 mod source_commit;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 
 pub use gwr_runtime::services::preparation::REPORTED_DIGEST_LABEL;
