@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""The network between the worker and the provider, with one injected fault.
+
+  --mode lose-reply    forward the request, let the provider answer, then drop
+                       the answer and close the worker's connection.
+  --mode lose-request  drop the request before it reaches the provider and
+                       close the worker's connection.
+
+This is the only place the demo decides what goes wrong. It does not know what
+Docket, the agent or the observer will conclude, and none of them read its log.
+The log is kept for the reader.
+"""
+import argparse
+import json
+import pathlib
+import socket
+import threading
+import time
+
+
+def now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def read_http(sock: socket.socket) -> bytes:
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return data
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(body) < length:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return head + b"\r\n\r\n" + body
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", required=True, choices=["lose-reply", "lose-request"])
+    parser.add_argument("--upstream-port-file", required=True, type=pathlib.Path)
+    parser.add_argument("--port-file", required=True, type=pathlib.Path)
+    parser.add_argument("--log", required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    upstream = int(args.upstream_port_file.read_text())
+
+    def log(**event) -> None:
+        with args.log.open("a") as handle:
+            handle.write(json.dumps({"at_unix_ms": now_ms(), "mode": args.mode, **event}, sort_keys=True) + "\n")
+
+    def serve(client: socket.socket) -> None:
+        with client:
+            request = read_http(client)
+            line = request.split(b"\r\n", 1)[0].decode(errors="replace")
+            if args.mode == "lose-request":
+                log(event="request-dropped", request_line=line, forwarded=False)
+                return
+            with socket.create_connection(("127.0.0.1", upstream)) as up:
+                up.sendall(request)
+                reply = read_http(up)
+            status = reply.split(b"\r\n", 1)[0].decode(errors="replace")
+            log(event="reply-dropped", request_line=line, forwarded=True, provider_status=status)
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    args.port_file.write_text(str(listener.getsockname()[1]))
+    while True:
+        client, _ = listener.accept()
+        threading.Thread(target=serve, args=(client,), daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

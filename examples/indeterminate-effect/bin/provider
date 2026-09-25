@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""A tiny stand-in payment provider: the external system the effect lands in.
+
+It is an ordinary service. It knows nothing about Docket, agents or the demo
+scenario, and it has no fault switches. It owns one ledger file and answers two
+requests on 127.0.0.1:
+
+  POST /v1/refunds          apply a refund request (idempotent by request id)
+  POST /v1/refunds/lookup   read-only: has this exact request been applied?
+
+A request carries `apply_before_unix_ms`. The provider applies a request only
+while its own clock is before that time, and refuses it afterwards. The request
+id is the sha256 of the canonical request, so the deadline cannot be changed
+without changing the id. Once the deadline has passed, "absent" is final.
+"""
+import argparse
+import hashlib
+import http.server
+import json
+import os
+import pathlib
+import threading
+import time
+
+FIELDS = {"schema", "order", "amount_cents", "currency", "apply_before_unix_ms", "idempotency_key"}
+
+
+def canonical(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def request_id(request: dict) -> str:
+    return "sha256:" + hashlib.sha256(canonical(request)).hexdigest()
+
+
+def now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+class Provider:
+    def __init__(self, state: pathlib.Path):
+        self.ledger = state / "ledger.jsonl"
+        self.access = state / "access.log"
+        self.lock = threading.Lock()
+        self.ledger.touch()
+
+    def entries(self) -> dict:
+        found = {}
+        for line in self.ledger.read_text().splitlines():
+            entry = json.loads(line)
+            found[entry["request_id"]] = entry
+        return found
+
+    def log(self, **event) -> None:
+        with self.access.open("a") as handle:
+            handle.write(json.dumps({"at_unix_ms": now_ms(), **event}, sort_keys=True) + "\n")
+
+    def apply(self, request: dict):
+        rid = request_id(request)
+        with self.lock:
+            now = now_ms()
+            existing = self.entries().get(rid)
+            if existing is not None:
+                self.log(op="apply", request_id=rid, result="already-applied")
+                return 200, existing
+            if now >= request["apply_before_unix_ms"]:
+                self.log(op="apply", request_id=rid, result="refused-deadline-passed")
+                return 409, {"refused": "deadline-passed", "request_id": rid, "provider_now_unix_ms": now}
+            entry = {"refund_id": "rf_" + rid[7:23], "request_id": rid, "request": request,
+                     "committed_at_unix_ms": now}
+            with self.ledger.open("a") as handle:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.log(op="apply", request_id=rid, result="applied")
+            return 201, entry
+
+    def lookup(self, request: dict):
+        rid = request_id(request)
+        with self.lock:
+            now = now_ms()
+            entry = self.entries().get(rid)
+        self.log(op="lookup", request_id=rid, result="committed" if entry else "absent")
+        if entry is not None:
+            return 200, {"request_id": rid, "state": "committed", "entry": entry, "provider_now_unix_ms": now}
+        return 200, {"request_id": rid, "state": "absent", "provider_now_unix_ms": now,
+                     "apply_before_unix_ms": request["apply_before_unix_ms"],
+                     "can_still_apply": now < request["apply_before_unix_ms"]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state", required=True, type=pathlib.Path)
+    parser.add_argument("--port-file", required=True, type=pathlib.Path)
+    args = parser.parse_args()
+    args.state.mkdir(parents=True, exist_ok=True)
+    provider = Provider(args.state)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                if not isinstance(body, dict) or set(body) != FIELDS:
+                    raise ValueError("bad request shape")
+            except (ValueError, json.JSONDecodeError):
+                status, answer = 400, {"refused": "malformed"}
+            else:
+                if self.path == "/v1/refunds":
+                    status, answer = provider.apply(body)
+                elif self.path == "/v1/refunds/lookup":
+                    status, answer = provider.lookup(body)
+                else:
+                    status, answer = 404, {"refused": "no-such-endpoint"}
+            data = canonical(answer)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    args.port_file.write_text(str(server.server_address[1]))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
