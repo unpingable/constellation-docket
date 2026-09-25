@@ -260,7 +260,7 @@ class Demo:
                       + heard + f"\nDocket now says: {reconciled['status'].upper()}.")
             if reconciled["status"] == "settled" or step >= 3:
                 break
-            wait = max(0.0, (plan["apply_before_unix_ms"] - now_ms()) / 1000) + 0.5
+            wait = max(0.0, (plan["apply_before_unix_ms"] - now_ms()) / 1000) + 1.2
             self.say(f"          Waiting {wait:.1f}s for the deadline to pass, then asking again.")
             time.sleep(wait)
 
