@@ -18,10 +18,10 @@ pub use gwr_runtime::governed_loop::{
     GovernedLoopInspectionV1, GovernedRecordInspectionV1, GovernedRecordStatusV1,
     IndeterminateOutcomeWireV1, IssuanceAuthenticationWireV1, KnownOutcomeWireV1,
     OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1, TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1,
-    CUSTODY_SCHEMA_V1, EXECUTOR_DISPATCH_SCHEMA_V1, EXECUTOR_OUTCOME_SCHEMA_V1,
-    EXECUTOR_TRANSPORT_SCHEMA_V1, INSPECTION_SCHEMA_V1, MAX_EXECUTOR_DOCUMENT_BYTES,
-    SETTLEMENT_SCHEMA_V1, SIGNED_ISSUANCE_SCHEMA_V1, STANDING_REQUEST_SCHEMA_V1,
-    STANDING_RESOLUTION_SCHEMA_V1,
+    AG_ISSUANCE_SCHEMA_V2, CUSTODY_SCHEMA_V1, EXECUTOR_DISPATCH_SCHEMA_V1,
+    EXECUTOR_OUTCOME_SCHEMA_V1, EXECUTOR_TRANSPORT_SCHEMA_V1, INSPECTION_SCHEMA_V1,
+    MAX_EXECUTOR_DOCUMENT_BYTES, MAX_STANDING_SNAPSHOT_AGE_MS, SETTLEMENT_SCHEMA_V1,
+    SIGNED_ISSUANCE_SCHEMA_V1, STANDING_REQUEST_SCHEMA_V1, STANDING_RESOLUTION_SCHEMA_V1,
 };
 use gwr_runtime::ports::governed_loop::{
     ExecutionStandingResolverV1, GovernedClockV1, GovernedCustodyStoreV1, GovernedExecutorV1,
@@ -132,6 +132,29 @@ fn accept_inner(
     executor_config: &Path,
     require_local_snapshot: bool,
 ) -> Result<DocketCustodyWireV1, String> {
+    accept_inner_with_clock(
+        database,
+        envelope_bytes,
+        trust_bytes,
+        standing_resolver,
+        executor,
+        executor_config,
+        require_local_snapshot,
+        &mut SystemGovernedClockV1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_inner_with_clock<C: GovernedClockV1>(
+    database: &Path,
+    envelope_bytes: &[u8],
+    trust_bytes: &[u8],
+    standing_resolver: &Path,
+    executor: &Path,
+    executor_config: &Path,
+    require_local_snapshot: bool,
+    clock: &mut C,
+) -> Result<DocketCustodyWireV1, String> {
     let (envelope, issuance) = verify_signed_issuance(envelope_bytes, trust_bytes)?;
     let mut store = SqliteGovernedCustodyStoreV1::open(database, require_local_snapshot)?;
     let effective_local_mode = store.require_local_snapshot;
@@ -143,14 +166,13 @@ fn accept_inner(
         program: executor,
         config: executor_config,
     };
-    let mut clock = SystemGovernedClockV1;
     governed_service::accept(
         &mut store,
         &envelope,
         &issuance,
         &mut resolver,
         &mut executor,
-        &mut clock,
+        clock,
     )
 }
 
@@ -584,8 +606,14 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                     let settled_at: Option<i64> = row.get(29)?;
                     let reconciliation: Option<String> = row.get(30)?;
                     let evidence: Option<String> = row.get(31)?;
+                    // Schema and not-after are carried only by the signed
+                    // body; every other field is an explicit column that
+                    // `validate_stored_record` binds to that body.
+                    let signed_body: String = row.get(0)?;
+                    let (schema, not_after_unix_ms) = stored_schema_and_not_after(&signed_body)
+                        .map_err(|_| sql_decode("governed stored issuance body"))?;
                     let issuance_record = AgIssuanceWireV1 {
-                        schema: AG_ISSUANCE_SCHEMA_V1.to_owned(),
+                        schema,
                         issuance: issuance.to_owned(),
                         key: OccurrenceKeyWireV1 {
                             campaign: row.get(5)?,
@@ -601,6 +629,7 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
                         standing_resolution: row.get(14)?,
                         mandate: row.get(15)?,
                         spend: row.get(16)?,
+                        not_after_unix_ms,
                     };
                     let custody = DocketCustodyWireV1 {
                         schema: CUSTODY_SCHEMA_V1.to_owned(),
@@ -763,6 +792,12 @@ impl GovernedCustodyStoreV1 for SqliteGovernedCustodyStoreV1 {
         }
         Ok(())
     }
+}
+
+fn stored_schema_and_not_after(signed_body_b64: &str) -> Result<(String, Option<u64>), String> {
+    let body = b64_decode(signed_body_b64)?;
+    let parsed: AgIssuanceWireV1 = strict_json(&body, "stored-issuance-body")?;
+    Ok((parsed.schema, parsed.not_after_unix_ms))
 }
 
 fn validate_stored_record(record: &CustodyRecordV1) -> Result<(), String> {
@@ -1273,6 +1308,7 @@ mod tests {
         custody: DocketCustodyWireV1,
         standing_program: std::path::PathBuf,
         executor_program: std::path::PathBuf,
+        signing_key: Vec<u8>,
     }
 
     impl Drop for Fixture {
@@ -1282,6 +1318,11 @@ mod tests {
     }
 
     fn fixture(executor_outcome: ExecutorOutcomeClassWireV1) -> Fixture {
+        fixture_at(executor_outcome, now_unix_ms().unwrap() + 3_600_000)
+    }
+
+    /// `not_after` is the signed issuance not-after on the caller's clock.
+    fn fixture_at(executor_outcome: ExecutorOutcomeClassWireV1, not_after: u64) -> Fixture {
         let root = std::env::temp_dir().join(format!(
             "docket-governed-loop-test-{}-{}",
             std::process::id(),
@@ -1292,7 +1333,7 @@ mod tests {
         drop(SqliteStore::open(&database).unwrap());
 
         let mut issuance = AgIssuanceWireV1 {
-            schema: AG_ISSUANCE_SCHEMA_V1.to_owned(),
+            schema: AG_ISSUANCE_SCHEMA_V2.to_owned(),
             issuance: digest("placeholder"),
             key: OccurrenceKeyWireV1 {
                 campaign: digest("campaign"),
@@ -1308,27 +1349,9 @@ mod tests {
             standing_resolution: digest("ag-standing-resolution"),
             mandate: digest("mandate"),
             spend: digest("ag-spend"),
+            not_after_unix_ms: Some(not_after),
         };
-        let basis = serde_json::json!({
-            "key": {
-                "campaign": issuance.key.campaign,
-                "occurrence": issuance.key.occurrence,
-            },
-            "mandate": issuance.mandate,
-            "observation": issuance.observation,
-            "program": issuance.program,
-            "proposal": issuance.proposal,
-            "scope": issuance.scope,
-            "spend": issuance.spend,
-            "standing_resolution": issuance.standing_resolution,
-            "subject": issuance.subject,
-            "work": issuance.work,
-            "work_schema": issuance.work_schema,
-        });
-        issuance.issuance = hash_domain(
-            "ag.governed-loop.issuance/v1",
-            &serde_json::to_vec(&basis).unwrap(),
-        );
+        issuance.issuance = gwr_runtime::governed_loop::issuance_identity(&issuance).unwrap();
         let body = serde_json::to_vec(&serde_json::to_value(&issuance).unwrap()).unwrap();
         let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
         let key = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
@@ -1384,10 +1407,7 @@ mod tests {
             expires_at_unix_ms: i64::MAX as u64,
         };
         let standing_program = root.join("standing-resolver");
-        write_static_program(
-            &standing_program,
-            &serde_json::to_string(&standing).unwrap(),
-        );
+        write_request_time_standing_program(&standing_program, &standing);
         let executor_program = root.join("executor");
         std::fs::write(root.join("executor-config"), issuance.work.as_bytes()).unwrap();
         write_executor(
@@ -1405,6 +1425,7 @@ mod tests {
             custody,
             standing_program,
             executor_program,
+            signing_key: document.as_ref().to_vec(),
         }
     }
 
@@ -2048,7 +2069,7 @@ mod tests {
             subject: substituted.issuance.subject.clone(),
             scope: substituted.issuance.scope.clone(),
             status: ExecutionStandingStatusV1::Current,
-            resolved_at_unix_ms: 0,
+            resolved_at_unix_ms: now_unix_ms().unwrap(),
             expires_at_unix_ms: i64::MAX as u64,
         };
         write_static_program(
@@ -2337,6 +2358,28 @@ mod tests {
         std::fs::set_permissions(path, permissions).unwrap();
     }
 
+    /// Like a real resolver, stamps `resolved_at_unix_ms` with the request's
+    /// `now_unix_ms` (the caller's clock, which may be scripted). Without a
+    /// request on stdin it uses the wall clock.
+    fn write_request_time_standing_program(path: &Path, standing: &ExecutionStandingResolutionV1) {
+        let mut template = standing.clone();
+        template.resolved_at_unix_ms = 0;
+        let json = serde_json::to_string(&template).unwrap();
+        let (before, after) = json.split_once("\"resolved_at_unix_ms\":0").unwrap();
+        let before = format!("{before}\"resolved_at_unix_ms\":").replace('\'', "'\\''");
+        let after = after.replace('\'', "'\\''");
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nnow=$(tr -d '\\n' | sed -n 's/.*\"now_unix_ms\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$now\" ] || now=$(date +%s%3N)\nprintf '%s%s%s' '{before}' \"$now\" '{after}'\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
     fn write_static_program(path: &Path, output: &str) {
         let escaped = output.replace('\'', "'\\''");
         std::fs::write(
@@ -2398,5 +2441,246 @@ mod tests {
             .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Effect-time warrant: signed issuance not-after on the real store,
+    // real executor process, and a scripted clock.
+
+    const NOT_AFTER: u64 = 1_790_000_060_000;
+
+    struct ScriptedClock(std::collections::VecDeque<u64>, u64);
+
+    impl GovernedClockV1 for ScriptedClock {
+        fn now_unix_ms(&mut self) -> Result<u64, String> {
+            if let Some(next) = self.0.pop_front() {
+                self.1 = next;
+            }
+            Ok(self.1)
+        }
+    }
+
+    fn accept_at(
+        fixture: &Fixture,
+        envelope: &[u8],
+        readings: &[u64],
+    ) -> Result<DocketCustodyWireV1, String> {
+        accept_inner_with_clock(
+            &fixture.database,
+            envelope,
+            &fixture.trust,
+            &fixture.standing_program,
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+            false,
+            &mut ScriptedClock(readings.iter().copied().collect(), 0),
+        )
+    }
+
+    fn sign_envelope(fixture: &Fixture, body: &[u8]) -> Vec<u8> {
+        let key = Ed25519KeyPair::from_pkcs8(&fixture.signing_key).unwrap();
+        let mut signed = SIGNATURE_PREFIX_V1.to_vec();
+        signed.extend_from_slice(body);
+        serde_json::to_vec(&SignedIssuanceEnvelopeWireV1 {
+            schema: SIGNED_ISSUANCE_SCHEMA_V1.to_owned(),
+            body_b64: b64_encode(body),
+            authentication: IssuanceAuthenticationWireV1 {
+                issuer_principal: "ag.test".to_owned(),
+                signer_key_id: "ag-test-key".to_owned(),
+                signer_public_key: b64_encode(key.public_key().as_ref()),
+                signature: b64_encode(key.sign(&signed).as_ref()),
+            },
+        })
+        .unwrap()
+    }
+
+    fn canonical_body(issuance: &AgIssuanceWireV1) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::to_value(issuance).unwrap()).unwrap()
+    }
+
+    fn counts(fixture: &Fixture) -> (i64, i64) {
+        let connection = Connection::open(&fixture.database).unwrap();
+        let count = |table: &str| -> i64 {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        (
+            count("governed_loop_attempt"),
+            count("governed_execution_standing_use"),
+        )
+    }
+
+    fn executed(fixture: &Fixture) -> bool {
+        fixture
+            .executor_program
+            .with_extension("invocations")
+            .exists()
+    }
+
+    #[test]
+    fn expired_issuance_refuses_at_accept_persists_nothing_and_is_not_refreshed_by_retry() {
+        let fixture = fixture_at(ExecutorOutcomeClassWireV1::Success, NOT_AFTER);
+        for now in [NOT_AFTER, NOT_AFTER + 1, NOT_AFTER + 3_600_000] {
+            assert_eq!(
+                accept_at(&fixture, &fixture.envelope, &[now]).unwrap_err(),
+                "governed-issuance-expired"
+            );
+        }
+        assert_eq!(counts(&fixture), (0, 0));
+        assert!(!executed(&fixture));
+        // The same delivery one millisecond before not-after is accepted.
+        accept_at(&fixture, &fixture.envelope, &[NOT_AFTER - 1]).unwrap();
+        assert_eq!(counts(&fixture), (1, 1));
+        assert!(executed(&fixture));
+    }
+
+    #[test]
+    fn expiry_after_custody_is_typed_indeterminate_and_recovery_never_executes() {
+        let fixture = fixture_at(ExecutorOutcomeClassWireV1::Success, NOT_AFTER);
+        let custody = accept_at(
+            &fixture,
+            &fixture.envelope,
+            &[NOT_AFTER - 10, NOT_AFTER - 5, NOT_AFTER],
+        )
+        .unwrap();
+        assert!(!executed(&fixture), "executor must not be invoked");
+        let record = inspect(&fixture.database, &fixture.issuance.issuance)
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(record.status, GovernedRecordStatusV1::Indeterminate);
+        assert_eq!(record.issuance.not_after_unix_ms, Some(NOT_AFTER));
+        assert_eq!(
+            record.indeterminate.unwrap().evidence,
+            gwr_runtime::governed_loop::issuance_expired_before_execute_evidence(&fixture.issuance)
+        );
+        // AG retry after expiry: same custody, no execution.
+        assert_eq!(
+            accept_at(&fixture, &fixture.envelope, &[NOT_AFTER + 1]).unwrap(),
+            custody
+        );
+        // Restart reconciliation after expiry: read-only, no execution.
+        reconcile(
+            &fixture.database,
+            &fixture.issuance.issuance,
+            Some(&custody.attempt),
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+        )
+        .unwrap();
+        assert!(!executed(&fixture));
+        assert_eq!(counts(&fixture), (1, 1));
+    }
+
+    #[test]
+    fn signed_not_after_cannot_be_extended() {
+        let fixture = fixture_at(ExecutorOutcomeClassWireV1::Success, NOT_AFTER);
+        let mut extended = fixture.issuance.clone();
+        extended.not_after_unix_ms = Some(NOT_AFTER + 3_600_000);
+        let body = canonical_body(&extended);
+        // Original signature over a rewritten not-after.
+        let mut envelope: SignedIssuanceEnvelopeWireV1 =
+            serde_json::from_slice(&fixture.envelope).unwrap();
+        envelope.body_b64 = b64_encode(&body);
+        assert_eq!(
+            accept_at(
+                &fixture,
+                &serde_json::to_vec(&envelope).unwrap(),
+                &[NOT_AFTER]
+            )
+            .unwrap_err(),
+            "governed-issuance-signature-invalid"
+        );
+        // Re-signed by the trusted key but with the original identity.
+        assert_eq!(
+            accept_at(&fixture, &sign_envelope(&fixture, &body), &[NOT_AFTER]).unwrap_err(),
+            "governed-issuance-identity-mismatch"
+        );
+        assert_eq!(counts(&fixture), (0, 0));
+    }
+
+    #[test]
+    fn retained_v1_custody_stays_verifiable_and_reconcilable_but_v1_is_never_dispatched() {
+        let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
+        let mut legacy = fixture.issuance.clone();
+        legacy.schema = AG_ISSUANCE_SCHEMA_V1.to_owned();
+        legacy.not_after_unix_ms = None;
+        legacy.issuance = gwr_runtime::governed_loop::issuance_identity(&legacy).unwrap();
+        let envelope_bytes = sign_envelope(&fixture, &canonical_body(&legacy));
+
+        // A new v1 delivery is refused before any owner is consulted.
+        assert_eq!(
+            accept(
+                &fixture.database,
+                &envelope_bytes,
+                &fixture.trust,
+                &fixture.standing_program,
+                &fixture.executor_program,
+                &fixture.root.join("executor-config"),
+            )
+            .unwrap_err(),
+            "governed-issuance-not-after-absent"
+        );
+        assert_eq!(counts(&fixture), (0, 0));
+
+        // Custody retained from before v2 (as alpha.6 wrote it) still reads,
+        // verifies, and reconciles, and re-delivery returns it unexecuted.
+        let (envelope, issuance) = verify_signed_issuance(&envelope_bytes, &fixture.trust).unwrap();
+        let now = now_unix_ms().unwrap();
+        let standing = ExecutionStandingResolutionV1 {
+            schema: STANDING_RESOLUTION_SCHEMA_V1.to_owned(),
+            resolution: digest("legacy-resolution"),
+            currentness: digest("legacy-currentness"),
+            execution_standing: digest("legacy-execution-standing"),
+            issuance: issuance.issuance.clone(),
+            campaign: issuance.key.campaign.clone(),
+            occurrence: issuance.key.occurrence.clone(),
+            subject: issuance.subject.clone(),
+            scope: issuance.scope.clone(),
+            status: ExecutionStandingStatusV1::Current,
+            resolved_at_unix_ms: now,
+            expires_at_unix_ms: now + 300_000,
+        };
+        let custody = gwr_runtime::governed_loop::make_custody(&issuance, &standing, now).unwrap();
+        let binding = resolve_executor_binding(
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+            &issuance.work,
+        )
+        .unwrap();
+        SqliteGovernedCustodyStoreV1::open(&fixture.database, false)
+            .unwrap()
+            .insert_custody(&envelope, &issuance, &standing, &custody, &binding)
+            .unwrap();
+        let inspected = inspect(&fixture.database, &issuance.issuance)
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(inspected.issuance.schema, AG_ISSUANCE_SCHEMA_V1);
+        assert_eq!(inspected.issuance.not_after_unix_ms, None);
+        assert_eq!(
+            accept(
+                &fixture.database,
+                &envelope_bytes,
+                &fixture.trust,
+                &fixture.standing_program,
+                &fixture.executor_program,
+                &fixture.root.join("executor-config"),
+            )
+            .unwrap(),
+            custody
+        );
+        reconcile(
+            &fixture.database,
+            &issuance.issuance,
+            Some(&custody.attempt),
+            &fixture.executor_program,
+            &fixture.root.join("executor-config"),
+        )
+        .unwrap();
+        assert!(!executed(&fixture));
     }
 }

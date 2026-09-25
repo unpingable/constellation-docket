@@ -8,7 +8,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 pub const SIGNED_ISSUANCE_SCHEMA_V1: &str = "ag.governed-loop.signed-issuance/v1";
+/// Historical AG issuance without a not-after. Verifiable as retained
+/// evidence; never accepted for a new custody or dispatch.
 pub const AG_ISSUANCE_SCHEMA_V1: &str = "ag.governed-loop.issuance/v1";
+/// AG issuance carrying a signed, exclusive `not_after_unix_ms`.
+pub const AG_ISSUANCE_SCHEMA_V2: &str = "ag.governed-loop.issuance/v2";
+/// Declared snapshot bound: a Docket execution-standing resolution may be
+/// relied on for custody and for executor dispatch only while
+/// `now - resolved_at <= MAX_STANDING_SNAPSHOT_AGE_MS` and `now < expires_at`.
+/// It is re-checked, with a fresh clock reading, immediately before the
+/// custody transaction and immediately before `execute`. It is also the
+/// upper bound on how long a revocation committed after a resolution can be
+/// ignored by a dispatch relying on that resolution.
+pub const MAX_STANDING_SNAPSHOT_AGE_MS: u64 = 30_000;
 pub const CUSTODY_SCHEMA_V1: &str = "ag.governed-loop.docket-custody/v1";
 pub const SETTLEMENT_SCHEMA_V1: &str = "ag.governed-loop.docket-settlement/v1";
 pub const STANDING_REQUEST_SCHEMA_V1: &str = "docket.governed-loop.execution-standing-request/v1";
@@ -54,6 +66,9 @@ pub struct AgIssuanceWireV1 {
     pub standing_resolution: String,
     pub mandate: String,
     pub spend: String,
+    /// Exclusive not-after of the effect (v2 only; absent on historical v1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -283,10 +298,46 @@ pub fn require_digest(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_issuance(issuance: &AgIssuanceWireV1) -> Result<(), String> {
-    if issuance.schema != AG_ISSUANCE_SCHEMA_V1 {
-        return Err("governed-issuance-schema".to_owned());
+/// Recomputes AG's canonical issuance identity under the carried schema.
+/// This is the AG-owned law pinned by the mirrored conformance corpus
+/// (`conformance/ag-governed-loop-issuance/v2-vectors.json`).
+pub fn issuance_identity(issuance: &AgIssuanceWireV1) -> Result<String, String> {
+    let domain = match (issuance.schema.as_str(), issuance.not_after_unix_ms) {
+        (AG_ISSUANCE_SCHEMA_V1, None) => AG_ISSUANCE_SCHEMA_V1,
+        (AG_ISSUANCE_SCHEMA_V2, Some(not_after)) if not_after > 0 => AG_ISSUANCE_SCHEMA_V2,
+        (AG_ISSUANCE_SCHEMA_V1 | AG_ISSUANCE_SCHEMA_V2, _) => {
+            return Err("governed-issuance-not-after-shape".to_owned())
+        }
+        _ => return Err("governed-issuance-schema".to_owned()),
+    };
+    let mut basis = serde_json::json!({
+        "key": {
+            "campaign": issuance.key.campaign,
+            "occurrence": issuance.key.occurrence,
+        },
+        "mandate": issuance.mandate,
+        "observation": issuance.observation,
+        "program": issuance.program,
+        "proposal": issuance.proposal,
+        "scope": issuance.scope,
+        "spend": issuance.spend,
+        "standing_resolution": issuance.standing_resolution,
+        "subject": issuance.subject,
+        "work": issuance.work,
+        "work_schema": issuance.work_schema,
+    });
+    if let Some(not_after) = issuance.not_after_unix_ms {
+        basis["not_after_unix_ms"] = serde_json::json!(not_after);
     }
+    let canonical =
+        serde_json::to_vec(&basis).map_err(|error| format!("governed-issuance-basis:{error}"))?;
+    Ok(hash_domain(domain, &canonical))
+}
+
+/// Verifies issuance shape and identity. This is verification of a record,
+/// not permission to dispatch it: historical v1 issuances pass here so that
+/// retained custody remains readable and reconcilable.
+pub fn validate_issuance(issuance: &AgIssuanceWireV1) -> Result<(), String> {
     for (value, label) in [
         (&issuance.issuance, "issuance"),
         (&issuance.key.campaign, "campaign"),
@@ -311,29 +362,69 @@ pub fn validate_issuance(issuance: &AgIssuanceWireV1) -> Result<(), String> {
     {
         return Err("governed-issuance-work-schema".to_owned());
     }
-    let basis = serde_json::json!({
-        "key": {
-            "campaign": issuance.key.campaign,
-            "occurrence": issuance.key.occurrence,
-        },
-        "mandate": issuance.mandate,
-        "observation": issuance.observation,
-        "program": issuance.program,
-        "proposal": issuance.proposal,
-        "scope": issuance.scope,
-        "spend": issuance.spend,
-        "standing_resolution": issuance.standing_resolution,
-        "subject": issuance.subject,
-        "work": issuance.work,
-        "work_schema": issuance.work_schema,
-    });
-    let canonical =
-        serde_json::to_vec(&basis).map_err(|error| format!("governed-issuance-basis:{error}"))?;
-    let expected = hash_domain("ag.governed-loop.issuance/v1", &canonical);
-    if expected != issuance.issuance {
+    if issuance_identity(issuance)? != issuance.issuance {
         return Err("governed-issuance-identity-mismatch".to_owned());
     }
     Ok(())
+}
+
+/// Effect-boundary rule for the AG warrant: the effect may begin only while
+/// `now < not_after`. A historical issuance without not-after is never
+/// dispatchable. The not-after is signed and identity-bound, so no retry,
+/// re-delivery, or reconciliation can refresh it.
+pub fn require_issuance_current(issuance: &AgIssuanceWireV1, now: u64) -> Result<(), String> {
+    match (issuance.schema.as_str(), issuance.not_after_unix_ms) {
+        (AG_ISSUANCE_SCHEMA_V2, Some(not_after)) if now < not_after => Ok(()),
+        (AG_ISSUANCE_SCHEMA_V2, Some(_)) => Err("governed-issuance-expired".to_owned()),
+        _ => Err("governed-issuance-not-after-absent".to_owned()),
+    }
+}
+
+/// Declared snapshot bound for Docket's own execution standing (see
+/// [`MAX_STANDING_SNAPSHOT_AGE_MS`]). Revocation after resolution stays
+/// non-retroactive, but only inside this bounded interval.
+pub fn require_standing_snapshot_within_bound(
+    standing: &ExecutionStandingResolutionV1,
+    now: u64,
+) -> Result<(), String> {
+    if standing.resolved_at_unix_ms > now {
+        return Err("governed-execution-standing-not-current".to_owned());
+    }
+    if now - standing.resolved_at_unix_ms > MAX_STANDING_SNAPSHOT_AGE_MS {
+        return Err("governed-execution-standing-snapshot-stale".to_owned());
+    }
+    if now >= standing.expires_at_unix_ms {
+        return Err("governed-execution-standing-expired".to_owned());
+    }
+    Ok(())
+}
+
+/// Indeterminate evidence recorded when the issuance not-after passed after
+/// custody but before `execute`; the executor was not invoked. Deterministic
+/// so a reader can recognise the cause from retained state.
+pub fn issuance_expired_before_execute_evidence(issuance: &AgIssuanceWireV1) -> String {
+    hash_domain(
+        "docket.governed-loop.issuance-expired-before-execute/v1",
+        format!(
+            "{}\0{}",
+            issuance.issuance,
+            issuance.not_after_unix_ms.unwrap_or_default()
+        )
+        .as_bytes(),
+    )
+}
+
+/// Indeterminate evidence recorded when the declared standing snapshot bound
+/// was exceeded after custody but before `execute`; the executor was not
+/// invoked.
+pub fn standing_snapshot_exceeded_before_execute_evidence(
+    issuance: &AgIssuanceWireV1,
+    custody: &DocketCustodyWireV1,
+) -> String {
+    hash_domain(
+        "docket.governed-loop.standing-snapshot-exceeded-before-execute/v1",
+        format!("{}\0{}", issuance.issuance, custody.standing_currentness).as_bytes(),
+    )
 }
 
 pub fn validate_standing(
@@ -359,13 +450,23 @@ pub fn validate_standing(
     {
         return Err("governed-execution-standing-binding-mismatch".to_owned());
     }
-    if standing.status != ExecutionStandingStatusV1::Current
-        || standing.resolved_at_unix_ms > now
-        || now >= standing.expires_at_unix_ms
-    {
-        return Err("governed-execution-standing-not-current".to_owned());
+    // Keep the owner's refusal classes distinct at the accept API.
+    match standing.status {
+        ExecutionStandingStatusV1::Current => {}
+        ExecutionStandingStatusV1::Absent => {
+            return Err("governed-execution-standing-absent".to_owned())
+        }
+        ExecutionStandingStatusV1::Revoked => {
+            return Err("governed-execution-standing-revoked".to_owned())
+        }
+        ExecutionStandingStatusV1::Superseded => {
+            return Err("governed-execution-standing-superseded".to_owned())
+        }
+        ExecutionStandingStatusV1::Expired => {
+            return Err("governed-execution-standing-expired".to_owned())
+        }
     }
-    Ok(())
+    require_standing_snapshot_within_bound(standing, now)
 }
 
 pub fn require_same_envelope(

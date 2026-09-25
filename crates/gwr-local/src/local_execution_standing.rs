@@ -552,7 +552,7 @@ mod tests {
     }
     fn issuance() -> AgIssuanceWireV1 {
         let mut issuance = AgIssuanceWireV1 {
-            schema: "ag.governed-loop.issuance/v1".into(),
+            schema: "ag.governed-loop.issuance/v2".into(),
             issuance: String::new(),
             key: OccurrenceKeyWireV1 {
                 campaign: digest("campaign"),
@@ -568,17 +568,14 @@ mod tests {
             standing_resolution: digest("ag-standing"),
             mandate: digest("mandate"),
             spend: digest("spend"),
+            not_after_unix_ms: Some(4_000_000_000_000),
         };
         refresh_identity(&mut issuance);
         assert!(gwr_runtime::governed_loop::validate_issuance(&issuance).is_ok());
         issuance
     }
     fn refresh_identity(issuance: &mut AgIssuanceWireV1) {
-        let basis = serde_json::json!({"key":{"campaign":issuance.key.campaign,"occurrence":issuance.key.occurrence},"mandate":issuance.mandate,"observation":issuance.observation,"program":issuance.program,"proposal":issuance.proposal,"scope":issuance.scope,"spend":issuance.spend,"standing_resolution":issuance.standing_resolution,"subject":issuance.subject,"work":issuance.work,"work_schema":issuance.work_schema});
-        issuance.issuance = hash_domain(
-            "ag.governed-loop.issuance/v1",
-            &serde_json::to_vec(&basis).unwrap(),
-        );
+        issuance.issuance = gwr_runtime::governed_loop::issuance_identity(issuance).unwrap();
     }
     fn input<'a>(i: &'a AgIssuanceWireV1, issued: u64, expires: u64) -> GrantInput<'a> {
         GrantInput {
