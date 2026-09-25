@@ -29,11 +29,12 @@ cd constellation-docket
 
 `run.sh` builds the two Docket binaries from this checkout with the pinned Rust
 toolchain (`rust-toolchain.toml`, 1.94.0; rustup fetches it on first use), runs
-the demo, then runs the independent check. On a 4-core VM, the first run takes
-about MINUTES_PLACEHOLDER, almost all of it the build. The demo itself takes about 10 seconds,
-most of it waiting for run B's deadline. Network access is needed only for
-the toolchain, the clone and the crates.io dependencies. The demo itself runs on
-127.0.0.1.
+the demo, then runs the independent check. On a fresh 4-core Debian 12 VM the
+whole path took about three minutes: 80 s for the packages, 12 s for rustup,
+the toolchain and the crates, 54 s for the build, and 10 s for the demo, most of
+which is waiting for run B's deadline. Network access is needed only for the
+packages, the toolchain, the clone and the crates.io dependencies. The build
+and the demo also run with the network cut off; the demo uses only 127.0.0.1.
 
 Everything is written to `examples/indeterminate-effect/out/<time>/`:
 `transcript.txt` (what you saw), `check.txt`, and the raw records listed below.
