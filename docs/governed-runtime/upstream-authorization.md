@@ -47,6 +47,14 @@ digest, effect class, repository, target ref, basis, admitted paths. The issuanc
 never its own yardstick. With `--request`, Docket additionally confirms the issuance
 names exactly the request bytes it exported.
 
+**Caution on the trust file.** A supported profile trusts exactly one AG issuer
+principal. Additional entries in the trust file are for key rotation of that one
+principal only (the same issuer principal under another key id). Do not list two
+independent AG issuers: Docket has no arbitration between them, and its uniqueness
+constraints are per attempt, so two trusted issuers can each authorize a separate
+occurrence of the same work and Docket will accept both. The same applies to the
+`--trust` file taken by `docket governed-loop accept`, which has the same shape.
+
 Docket does **not** re-run the upstream policy question. It evaluates no catalog, no
 principal-chain authority, and no judgement about whether the decision was wise. Those
 are the upstream office's; Docket checks authenticity, freshness, and exact binding.
