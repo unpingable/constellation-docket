@@ -8,6 +8,19 @@ journal view); all three accept `--json`.
 
 Recurring rules:
 
+- **Every effect boundary has an explicit authority-validity rule.** Authority is not
+  assumed valid merely because it was valid when acquired. Each boundary names its
+  rule: live revalidation at the effect, a deliberately frozen or snapshot basis with
+  a declared bound, exclusive custody with an atomic check-and-effect, or another
+  explicitly defined bounded rule. For governed-loop custody Docket checks the AG
+  issuance's signed not-after and its own standing snapshot (at most 30 s old, before
+  grant expiry) immediately before the custody transaction and again immediately
+  before `execute`; see [local execution standing](local-execution-standing.md).
+  An `indeterminate` governed record whose evidence is
+  `docket.governed-loop.issuance-expired-before-execute/v1` or
+  `docket.governed-loop.standing-snapshot-exceeded-before-execute/v1` was never
+  dispatched: reconcile it, then start a new AG occurrence. Never re-sign or
+  re-present it with a later not-after.
 - **Retry is never a re-dispatch.** One dispatch identity exists per attempt, forever.
   Where "retry" is safe below, it always means *a new attempt* (new admission, new
   standing, new reservation) against the current basis.

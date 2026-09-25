@@ -100,10 +100,61 @@ commits the subsequently authenticated AG issuance.
 receipt. Older external-resolver V1 custody remains readable and has no invented
 local snapshot.
 
-Snapshot-currentness is the approved rule. Revocation committed after a
-successful resolution is non-retroactive for that custody attempt. A concurrent
-revocation appends a new revision; it does not mutate the exact revision already
-observed and retained with custody. Before resolution, absent, revoked,
-superseded, expired, future-dated, ambiguous, or mismatched permission state
-fails closed. After custody, executor uncertainty uses the retained same-attempt
-reconciliation path and never re-resolves standing or redispatches mechanics.
+## Declared currentness bound
+
+Snapshot currentness is the approved rule, and it is a declared bound, not an
+open-ended one. A revocation committed after a successful resolution is
+non-retroactive for that custody attempt: a concurrent revocation appends a new
+revision and does not mutate the exact revision already observed and retained
+with custody. That non-retroactivity holds only inside this interval:
+
+| Bound | Value | Where checked |
+|---|---|---|
+| Resolution age (`now - resolved_at`) | at most 30 000 ms (`MAX_STANDING_SNAPSHOT_AGE_MS`) | at resolution, again immediately before the custody transaction, and again immediately before `execute` |
+| Grant expiry | `now < expires_at` (grant lifetime at most 300 s) | the same three points |
+| Resolution to custody | at most 30 s (the age bound); the local-mode resolver deadline is 5 s | immediately before the custody transaction |
+| Custody to executor dispatch | resolution to dispatch at most 30 s | immediately before `execute` |
+| Revocation latency | a revocation committed at time `r` stops every dispatch that begins after `r + 30 s`; an earlier dispatch may rely on a resolution taken before `r` | follows from the age bound |
+
+Every check uses one injected clock. Before custody, a failed check refuses and
+persists nothing, so no standing use is consumed:
+`governed-execution-standing-snapshot-stale` or
+`governed-execution-standing-expired`. After custody it records the attempt
+`indeterminate` with evidence
+`docket.governed-loop.standing-snapshot-exceeded-before-execute/v1` and never
+invokes the executor. A resolver answer older than the bound is refused even
+though the grant window still contains it.
+
+The bound covers when the effect may begin. It does not bound how long an
+executor runs once it is dispatched.
+
+Before resolution, absent, revoked, superseded, expired, future-dated, ambiguous
+or mismatched permission state fails closed. `accept` keeps these refusals
+distinct: `governed-execution-standing-absent`, `-revoked`, `-superseded`,
+`-expired` and `-not-current` (future-dated). After custody, executor
+uncertainty uses the retained same-attempt reconciliation path and never
+re-resolves standing or redispatches mechanics.
+
+## AG issuance not-after
+
+The local grant is Docket's own warrant. The AG warrant is carried by the signed
+issuance. Custody requires `ag.governed-loop.issuance/v2`, whose
+`not_after_unix_ms` is part of both AG's identity digest and the signed body.
+Docket enforces `now < not_after` with the same clock at the three points
+above. A retry, re-delivery or reconciliation cannot refresh it: the value is
+signed and identity-bound, so a different value is a different issuance that
+only AG's key could produce. AG rebuilds its issuance deterministically from the
+spend and never re-mints, and once custody exists for an AG spend Docket refuses
+any other issuance for that spend. Expiry before custody refuses as `governed-issuance-expired`.
+Expiry after custody records `indeterminate` with evidence
+`docket.governed-loop.issuance-expired-before-execute/v1` and does not execute.
+A historical `ag.governed-loop.issuance/v1` (alpha.6 and earlier) has no
+not-after. It is refused for new custody as `governed-issuance-not-after-absent`.
+Custody already retained under v1 still verifies, inspects and reconciles:
+verifying a record is not dispatching it. The identity, canonical bytes and
+signature law are pinned by `conformance/ag-governed-loop-issuance/v2-vectors.json`,
+a byte-for-byte mirror of AG's corpus.
+
+Revocation of an AG issuance is not implemented. A short not-after limits how
+long a withdrawn AG decision can still reach an effect, but expiry is not
+revocation.

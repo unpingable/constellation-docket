@@ -71,6 +71,12 @@ recorded *basis*; it is never presented to the broker and never becomes a token.
 - The minted grant is thereafter an ordinary Docket grant: consumed exactly once by
   ratification, refusing on replay like any other.
 
+The governed-loop issuance (`ag.governed-loop.issuance/v2`, accepted by
+`docket governed-loop accept`) is a different record with the same rule: it carries a
+signed `not_after_unix_ms`, and Docket refuses to begin the effect at or after it,
+checking immediately before custody and again immediately before `execute`. See
+[local execution standing](local-execution-standing.md#ag-issuance-not-after).
+
 ## Premises and residual obligations
 
 Upstream **authorization** premises and this effect class's **settlement** premises are
