@@ -105,7 +105,7 @@ def scenario(run: pathlib.Path, name: str, docket: str | None, repo_vectors: pat
     # 2. The agent's claim.
     claim = load(home / "agent-claim.json")
     check(claim["message"].startswith("Done.") and claim["basis"] == "command exited 0",
-          f"agent claimed success on exit code 0: {claim['message']!r}")
+          f"agent claimed success because its command exited 0")
 
     # 3. The ambiguity and the intermediate disposition.
     first = load(home / "docket-after-accept.json")["record"]
@@ -135,14 +135,14 @@ def scenario(run: pathlib.Path, name: str, docket: str | None, repo_vectors: pat
     check(len(applies) <= 1, f"provider received this request {len(applies)} time(s) (never twice)")
     if ledger:
         truth = "success"
-        why = f"provider ledger has refund {ledger[0]['refund_id']}"
+        why = f"the ledger has refund {ledger[0]['refund_id']}"
     elif lookups and lookups[-1]["at_unix_ms"] >= plan["apply_before_unix_ms"]:
         truth = "failure"
-        why = "provider ledger has no such refund and its deadline had passed at the last lookup"
+        why = "no such refund in the ledger; deadline passed before the last lookup"
     else:
         truth = "indeterminate"
-        why = "provider ledger has no such refund, and it could still apply"
-    print(f"        re-derived from the provider's records: {truth} ({why})")
+        why = "no such refund in the ledger; it could still apply"
+    print(f"        from the provider's records: {truth} ({why})")
 
     # 5. The independent observation(s).
     observations = {}

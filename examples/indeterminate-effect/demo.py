@@ -40,6 +40,11 @@ def clock(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%H:%M:%S")
 
 
+def short(path: pathlib.Path) -> str:
+    relative = os.path.relpath(path)
+    return relative if len(relative) < len(str(path)) else str(path)
+
+
 def dollars(cents: int) -> str:
     return f"${cents // 100}.{cents % 100:02d}"
 
@@ -134,7 +139,7 @@ class Demo:
         self.say(f"Docket, which keeps custody of each attempt and its result: {version}")
         self.say(f"Authorization signer: stand-in, reproduces AG's published test vector (sha256 {vector_sha[:12]}...)")
         self.say(f"Provider: stand-in payment service on 127.0.0.1:{self.provider_port}, ledger {provider_dir.name}/ledger.jsonl")
-        self.say(f"Receipts: {self.out}")
+        self.say(f"Receipts: {short(self.out)}")
 
     # -- one scenario -------------------------------------------------------
     def scenario(self, name: str, title: str, fault: str, order: str, cents: int) -> None:
@@ -203,8 +208,9 @@ class Demo:
             evidence = json.loads(no_reply[0].read_text())
             waited = (evidence["gave_up_at_unix_ms"] - evidence["sent_at_unix_ms"]) / 1000
             self.beat(2, "Outcome ambiguous",
-                      f"The worker sent the request, then got no reply ({evidence['error']}, after {waited:.1f}s).\n"
-                      f"It cannot tell whether the refund happened, and says so: outcome \"indeterminate\".")
+                      f"The worker sent the request; the connection closed with no reply after {waited:.1f}s\n"
+                      f"({evidence['error'].split(':')[0]}). It cannot tell whether the refund happened,\n"
+                      f"and says so: outcome \"indeterminate\".")
         else:
             self.beat(2, "Outcome ambiguous", "The worker received a reply: " + ", ".join(p.name for p in journal))
         self.beat(3, "Agent says success",
@@ -215,14 +221,15 @@ class Demo:
         record = after["record"]
         text = (f"Docket's record for this attempt: {record['status'].upper()}.\n"
                 f"Settlement: {'none' if record['settlement'] is None else record['settlement']['outcome']}. "
-                f"Not success, not failure; the exit code 0 only meant Docket took custody.")
+                f"Not success, not failure.\n"
+                f"The exit code 0 the agent saw only meant that Docket took custody.")
         # Asking again must not resend the refund.
         again = self.run(accept, stdin=envelope_file.read_bytes(), check=False)
         (home / "redelivery-response.json").write_bytes(again.stdout)
         same = again.returncode == 0 and json.loads(again.stdout) == json.loads((home / "accept-response.json").read_text())
         reservations = len(list((home / "executor-journal").glob("*.reservation.json")))
-        text += (f"\nSending the same authorization again returns {'the same' if same else 'a DIFFERENT'} attempt; "
-                 f"the worker has sent {reservations} request(s) in total.")
+        text += (f"\nSending the same authorization again returns {'the same' if same else 'a DIFFERENT'} attempt.\n"
+                 f"The worker has sent {reservations} request(s) in total.")
         self.beat(4, "System: INDETERMINATE" if record["status"] == "indeterminate"
                   else f"System: {record['status'].upper()}", text)
 
@@ -239,7 +246,7 @@ class Demo:
             seen = json.loads(observations[-1].read_text())
             answer = seen["provider_answer"]
             if answer["state"] == "committed":
-                heard = (f"provider: request {answer['request_id'][:19]}... is COMMITTED as refund "
+                heard = (f"provider: this exact request is COMMITTED, as refund "
                          f"{answer['entry']['refund_id']} at {clock(answer['entry']['committed_at_unix_ms'])} UTC.")
             elif answer["can_still_apply"]:
                 heard = (f"provider: no such refund yet, but the request could still apply until "
@@ -269,10 +276,10 @@ class Demo:
         else:
             self.beat(6, "Final disposition", f"Docket still says {record['status'].upper()}.")
         network = [json.loads(line) for line in (home / "network.log").read_text().splitlines()]
-        events = "; ".join(("request reached the provider, which answered " + e["provider_status"].split(" ", 1)[1]
-                            + ", then the reply was dropped") if e["forwarded"]
-                           else "request was dropped before reaching the provider" for e in network)
-        self.say(f"          (Behind the scenes, from the network log: {events}.)")
+        events = "; ".join(("the request reached the provider, which answered " + e["provider_status"].split(" ", 1)[1]
+                            + ";\n           the reply was dropped") if e["forwarded"]
+                           else "the request was dropped before it reached the provider" for e in network)
+        self.say(f"          (Behind the scenes, from the network log:\n           {events}.)")
 
     def summary(self) -> None:
         rows = []
@@ -289,7 +296,7 @@ class Demo:
             self.say(f"{name:<16}{'done (exit ' + basis.split()[-1] + ')':<22}{first:<18}{outcome}")
         self.say('The agent said "done" both times. The final answers differ, and each one follows')
         self.say("what the provider's own records show, not what the agent said.")
-        self.say(f"Check it yourself: python3 {HERE / 'check.py'} {self.out}")
+        self.say(f"Check it yourself: python3 {short(HERE / 'check.py')} {short(self.out)}")
 
 
 def main() -> None:
