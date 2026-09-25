@@ -8,8 +8,7 @@ authority, repository-identity, settlement, or reliance semantics.
 
 The operator environment needs:
 
-- a Rust toolchain with Cargo capable of building this Rust 2021 workspace. The repository
-  does not declare a minimum supported Rust version, so use a current stable toolchain and
+- the Rust toolchain pinned in `rust-toolchain.toml` (1.94.0, with clippy and rustfmt);
   run all repository gates before relying on a build;
 - network access to the configured Cargo registry, or an already populated Cargo cache,
   because dependencies are locked but not vendored;
