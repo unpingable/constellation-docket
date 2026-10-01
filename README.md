@@ -150,3 +150,7 @@ reports should not be filed as public issues.
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Attribution and authorship: [PROVENANCE.md](PROVENANCE.md).
+
+## Beta work planning
+
+See the [current beta work plan](docs/BETA-WORK.md) for owned requirements, exclusions, dependencies and GitHub issues. Plan publication does not start implementation or transfer qualification.
