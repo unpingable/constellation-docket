@@ -1,0 +1,57 @@
+{
+  "schema": "docket.experimental.host-guest-pipe-corpus/v1",
+  "request_cases": [
+    {
+      "name": "hello-valid",
+      "expect": "accept",
+      "input": "{\"verb\":\"HELLO\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":1}"
+    },
+    {
+      "name": "execute-valid",
+      "expect": "accept",
+      "input": "{\"verb\":\"EXECUTE\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":2,\"attempt\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"marker\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"work_schema\":\"docket.experimental.fixed-result-cell-work/v1\",\"work\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"subject\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\",\"scope\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\"}"
+    },
+    {
+      "name": "reconcile-valid",
+      "expect": "accept",
+      "input": "{\"verb\":\"RECONCILE\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":2,\"attempt\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"marker\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"work_schema\":\"docket.experimental.fixed-result-cell-work/v1\",\"work\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"subject\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\",\"scope\":\"sha256:5555555555555555555555555555555555555555555555555555555555555555\"}"
+    },
+    {
+      "name": "unknown-fourth-verb",
+      "expect": "decode-refusal",
+      "input": "{\"verb\":\"RUN\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":2}"
+    },
+    {
+      "name": "malformed-json",
+      "expect": "decode-refusal",
+      "input": "{\"verb\":"
+    },
+    {
+      "name": "duplicate-known-field",
+      "expect": "decode-refusal",
+      "input": "{\"verb\":\"HELLO\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":1}"
+    },
+    {
+      "name": "unknown-field",
+      "expect": "decode-refusal",
+      "input": "{\"verb\":\"HELLO\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":1,\"program\":\"/bin/sh\"}"
+    },
+    {
+      "name": "wrong-protocol-version",
+      "expect": "semantic-refusal",
+      "input": "{\"verb\":\"HELLO\",\"protocol\":\"docket.experimental.host-guest-pipe/v2\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":1}"
+    },
+    {
+      "name": "stale-sequence",
+      "expect": "semantic-refusal",
+      "input": "{\"verb\":\"HELLO\",\"protocol\":\"docket.experimental.host-guest-pipe/v1\",\"session\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"sequence\":0}"
+    }
+  ],
+  "frame_cases": [
+    { "name": "zero-length", "expect": "refusal", "hex": "00000000" },
+    { "name": "oversized", "expect": "refusal", "hex": "00004001" },
+    { "name": "truncated-prefix", "expect": "refusal", "hex": "0000" },
+    { "name": "truncated-body", "expect": "refusal", "hex": "000000027b" },
+    { "name": "malformed-body", "expect": "refusal", "hex": "000000017b" }
+  ]
+}
