@@ -46,7 +46,7 @@ Dependencies: Program release scope and current component contracts.
 
 Acceptance/evidence: Ordinary exact binding, expiry, revocation, ambiguity and refusal cases; no identity-only specimen claimed as live standing.
 
-Owner decisions: Execution-standing principal, currentness and revocation source.
+Owner decision recorded 2026-10-01: the root-controlling deployment/release operator owns principal, currentness and revocation; Docket consumes and enforces the enrolled projection. See [execution-standing-enrollment.md](governed-runtime/execution-standing-enrollment.md) for the installed contract.
 
 Owning issue: [DK-02](https://github.com/unpingable/constellation-docket/issues/3).
 

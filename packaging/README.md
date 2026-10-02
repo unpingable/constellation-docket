@@ -11,3 +11,5 @@ Installation is inert. Enrollment remains explicit: issuer trust, Docket state,
 standing resolver, executor program and sealed plan. Experimental VM/session
 executors, Git broker/provider workflows and their dependencies are excluded.
 Do not pass current signed dispatch through a legacy bare-dispatch adapter.
+
+The package also ships the inert `docket-standing-resolver` owner-projection reader. It installs no enrollment or standing snapshot; see `docs/governed-runtime/execution-standing-enrollment.md`.

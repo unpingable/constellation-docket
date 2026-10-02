@@ -1,0 +1,38 @@
+{
+  "request": {
+    "schema": "docket.governed-loop.execution-standing-request/v1",
+    "now_unix_ms": 150,
+    "issuance": {
+      "schema": "ag.governed-loop.issuance/v1",
+      "issuance": "sha256:c804cdd29c32160ccb01d00fafac88b9cda462511cb45a904641c371c1638a6d",
+      "key": {
+        "campaign": "sha256:6b5822cf0086ac5781c2259c6fbdb115d20f6c2cc4a34501bcf5de1dbe650d90",
+        "occurrence": "00000000-0000-0000-0000-000000000001"
+      },
+      "program": "sha256:e412243b5fd6182f5e57f9875e0b5475c79dda2b1a6c12a7ae2a92c69a23f2fc",
+      "proposal": "sha256:38c3a68ec6a849204219ac00b931da64878436786c36e82f19b9e1be1ab38807",
+      "work_schema": "synthetic.work/v1",
+      "work": "sha256:d3e1bc8344afe3bc43ecb527fb51eb84496a29fd14362861f588cda80e2bc3bb",
+      "subject": "sha256:e7095e97397d330b1aa1453e1e2b658fe1d731ebd0cf1798a81ab787801ee311",
+      "scope": "sha256:590e5d08c77056db1c32fb35f0ed6805ec93fe79bbdfe821f19af9382f8c077e",
+      "observation": "sha256:ab500165f788ae55a6fc9a3fbe43343ae7261c25e339394c429bb3d72b08d208",
+      "standing_resolution": "sha256:d773f2c1d23e1a0ebdad9ee22cd2dded6f6b569732e93ea2d0f779099b606b69",
+      "mandate": "sha256:3a21da7d6e23d8ce21f37080243f27f7aacbafe68f403752c8e311ee931588bc",
+      "spend": "sha256:f0e4e2806d8e639d5d6c3415814699c0d017ce8ad7f7d468f3cd1221796e1a7c"
+    }
+  },
+  "resolution": {
+    "schema": "docket.governed-loop.execution-standing-resolution/v1",
+    "resolution": "sha256:0f10f841a5616de72d4a93859ac9581a0d480952f70c2533387af2d0278738f2",
+    "currentness": "sha256:33441f9ffa188d399cf410e56998d3c1f034c2f87cc4d57545958090864da075",
+    "execution_standing": "sha256:a344c95e8c3e30c40671694757924065597bc758f28230c9a317fab733d94c93",
+    "issuance": "sha256:c804cdd29c32160ccb01d00fafac88b9cda462511cb45a904641c371c1638a6d",
+    "campaign": "sha256:6b5822cf0086ac5781c2259c6fbdb115d20f6c2cc4a34501bcf5de1dbe650d90",
+    "occurrence": "00000000-0000-0000-0000-000000000001",
+    "subject": "sha256:e7095e97397d330b1aa1453e1e2b658fe1d731ebd0cf1798a81ab787801ee311",
+    "scope": "sha256:590e5d08c77056db1c32fb35f0ed6805ec93fe79bbdfe821f19af9382f8c077e",
+    "status": "current",
+    "resolved_at_unix_ms": 100,
+    "expires_at_unix_ms": 200
+  }
+}
