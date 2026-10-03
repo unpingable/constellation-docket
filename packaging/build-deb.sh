@@ -15,6 +15,7 @@ d=$stage/constellation-docket
 install -d -m 0755 "$d/DEBIAN" "$d/usr/bin" "$d/usr/share/doc/constellation-docket"
 install -m 0755 "$bin_dir/docket" "$d/usr/bin/docket"
 install -m 0755 "$bin_dir/docket-standing-resolver" "$d/usr/bin/docket-standing-resolver"
+install -m 0755 "$bin_dir/docket-standing-grant-resolver" "$d/usr/bin/docket-standing-grant-resolver"
 install -m 0644 "$root/LICENSE" "$d/usr/share/doc/constellation-docket/copyright"
 install -m 0644 "$root/packaging/README.md" "$d/usr/share/doc/constellation-docket/"
 cat > "$d/DEBIAN/control" <<CONTROL

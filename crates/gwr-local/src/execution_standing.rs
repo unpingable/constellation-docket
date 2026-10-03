@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 const LIMIT: u64 = 1_048_576;
 #[derive(Debug, Deserialize)]
@@ -56,28 +56,87 @@ pub fn project(
 /// Read a bounded root-controlled regular file, excluding caller-selected paths,
 /// symlinks, writable ancestors and writable files. Root is the enrolled authority.
 pub fn read_owner_file(path: &Path) -> Result<Vec<u8>, String> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-    {
-        return Err("execution-standing-owner-path".into());
-    }
-    for ancestor in path.ancestors().skip(1) {
-        let m = std::fs::symlink_metadata(ancestor).map_err(|e| e.to_string())?;
-        if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
-            return Err("execution-standing-owner-directory".into());
+    read_trusted_file(path, &OwnerTrust::root())
+}
+
+/// Who may own enrolled owner files and their ancestors. Installed resolvers use
+/// only [`OwnerTrust::root`]; the anchored form exists for unprivileged tests.
+#[derive(Clone, Debug)]
+pub struct OwnerTrust {
+    uid: u32,
+    anchor: PathBuf,
+}
+
+impl OwnerTrust {
+    /// uid 0 owns the file and every ancestor up to `/`.
+    pub fn root() -> Self {
+        Self {
+            uid: 0,
+            anchor: PathBuf::from("/"),
         }
     }
+
+    /// Unprivileged test trust: `uid` owns the file and its ancestors up to and
+    /// including `anchor`; ancestors above `anchor` are not examined.
+    pub fn anchored_for_tests(uid: u32, anchor: impl Into<PathBuf>) -> Self {
+        Self {
+            uid,
+            anchor: anchor.into(),
+        }
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Absolute, `..`-free path below the anchor whose ancestors are trusted
+    /// directories (owned by the trusted uid, no group/other write, no symlink).
+    pub fn require_trusted_ancestors(&self, path: &Path) -> Result<(), String> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+            || !path.starts_with(&self.anchor)
+        {
+            return Err("execution-standing-owner-path".into());
+        }
+        for ancestor in path.ancestors().skip(1) {
+            self.require_trusted_directory(ancestor)?;
+            if ancestor == self.anchor {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn require_trusted_directory(&self, path: &Path) -> Result<(), String> {
+        let m = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !m.is_dir() || m.uid() != self.uid || m.mode() & 0o022 != 0 {
+            return Err("execution-standing-owner-directory".into());
+        }
+        Ok(())
+    }
+
+    /// Opened-file check: a regular file owned by the trusted uid,
+    /// without group/other write, within the document bound.
+    pub fn require_trusted_opened(&self, file: &File) -> Result<(), String> {
+        let m = file.metadata().map_err(|e| e.to_string())?;
+        if !m.is_file() || m.uid() != self.uid || m.mode() & 0o022 != 0 || m.len() > LIMIT {
+            return Err("execution-standing-owner-file".into());
+        }
+        Ok(())
+    }
+}
+
+/// [`read_owner_file`] under an explicit owner trust.
+pub fn read_trusted_file(path: &Path, trust: &OwnerTrust) -> Result<Vec<u8>, String> {
+    trust.require_trusted_ancestors(path)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(|e| e.to_string())?;
-    let m = file.metadata().map_err(|e| e.to_string())?;
-    if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 || m.len() > LIMIT {
-        return Err("execution-standing-owner-file".into());
-    }
+    trust.require_trusted_opened(&file)?;
     read_bounded(file)
 }
 

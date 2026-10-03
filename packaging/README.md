@@ -13,3 +13,5 @@ executors, Git broker/provider workflows and their dependencies are excluded.
 Do not pass current signed dispatch through a legacy bare-dispatch adapter.
 
 The package also ships the inert `docket-standing-resolver` owner-projection reader. It installs no enrollment or standing snapshot; see `docs/governed-runtime/execution-standing-enrollment.md`.
+
+It also ships the inert `docket-standing-grant-resolver`, which derives one standing per AG issuance from an owner-enrolled bounded grant. It installs no enrollment, grant or use journal; see the same document.

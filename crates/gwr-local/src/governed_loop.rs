@@ -1820,6 +1820,288 @@ mod tests {
         assert!(overflow);
     }
 
+    /// Docket's AG-facing resolver port answered by the owner-enrolled grant.
+    struct GrantStandingResolver<'a> {
+        enrollment: &'a crate::execution_standing_grant::GrantEnrollmentV1,
+        trust: &'a crate::execution_standing::OwnerTrust,
+    }
+
+    impl ExecutionStandingResolverV1 for GrantStandingResolver<'_> {
+        fn resolve(
+            &mut self,
+            request: &ExecutionStandingRequestV1,
+        ) -> Result<ExecutionStandingResolutionV1, String> {
+            crate::execution_standing_grant::derive_standing(self.enrollment, self.trust, request)
+        }
+    }
+
+    /// A second AG issuance of the same work for a new occurrence.
+    fn signed_issuance(occurrence: &str, spend: &str) -> (Vec<u8>, AgIssuanceWireV1, Vec<u8>) {
+        let mut issuance = AgIssuanceWireV1 {
+            schema: AG_ISSUANCE_SCHEMA_V1.to_owned(),
+            issuance: String::new(),
+            key: OccurrenceKeyWireV1 {
+                campaign: digest("campaign"),
+                occurrence: occurrence.to_owned(),
+            },
+            program: digest("program"),
+            proposal: digest("proposal"),
+            work_schema: "test.executor/v1".to_owned(),
+            work: digest("work"),
+            subject: digest("subject"),
+            scope: digest("scope"),
+            observation: digest(&format!("observation-{occurrence}")),
+            standing_resolution: digest("ag-standing-resolution"),
+            mandate: digest("mandate"),
+            spend: digest(spend),
+        };
+        let basis = serde_json::json!({
+            "key": {"campaign": issuance.key.campaign, "occurrence": issuance.key.occurrence},
+            "mandate": issuance.mandate,
+            "observation": issuance.observation,
+            "program": issuance.program,
+            "proposal": issuance.proposal,
+            "scope": issuance.scope,
+            "spend": issuance.spend,
+            "standing_resolution": issuance.standing_resolution,
+            "subject": issuance.subject,
+            "work": issuance.work,
+            "work_schema": issuance.work_schema,
+        });
+        issuance.issuance = hash_domain(
+            "ag.governed-loop.issuance/v1",
+            &serde_json::to_vec(&basis).unwrap(),
+        );
+        let body = serde_json::to_vec(&serde_json::to_value(&issuance).unwrap()).unwrap();
+        let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let key = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+        let mut signed = SIGNATURE_PREFIX_V1.to_vec();
+        signed.extend_from_slice(&body);
+        let public_key = b64_encode(key.public_key().as_ref());
+        let envelope = SignedIssuanceEnvelopeWireV1 {
+            schema: SIGNED_ISSUANCE_SCHEMA_V1.to_owned(),
+            body_b64: b64_encode(&body),
+            authentication: IssuanceAuthenticationWireV1 {
+                issuer_principal: "ag.test".to_owned(),
+                signer_key_id: "ag-test-key-2".to_owned(),
+                signer_public_key: public_key.clone(),
+                signature: b64_encode(key.sign(&signed).as_ref()),
+            },
+        };
+        let trust = serde_json::to_vec(&AgIssuerTrustConfigV1 {
+            issuers: vec![TrustedAgIssuerV1 {
+                issuer_principal: "ag.test".to_owned(),
+                key_id: "ag-test-key-2".to_owned(),
+                public_key,
+            }],
+        })
+        .unwrap();
+        (serde_json::to_vec(&envelope).unwrap(), issuance, trust)
+    }
+
+    #[test]
+    fn grant_derived_standing_is_accepted_once_and_refuses_a_second_custody() {
+        use crate::execution_standing::OwnerTrust;
+        use crate::execution_standing_grant::{
+            sha256_digest, GrantEnrollmentV1, OwnerStandingGrantV1, GRANT_ENROLLMENT_SCHEMA_V1,
+            GRANT_SCHEMA_V1,
+        };
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
+        let mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(&fixture.root, 0o755);
+        let owner = fixture.root.join("owner");
+        let journal = fixture.root.join("uses");
+        std::fs::create_dir(&owner).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        mode(&owner, 0o755);
+        mode(&journal, 0o700);
+        let trust = OwnerTrust::anchored_for_tests(
+            std::fs::metadata(&fixture.root).unwrap().uid(),
+            &fixture.root,
+        );
+        let now = now_unix_ms().unwrap();
+        let grant = OwnerStandingGrantV1 {
+            schema: GRANT_SCHEMA_V1.to_owned(),
+            grant_id: "test-grant/1".to_owned(),
+            principal: "test-owner".to_owned(),
+            subject: fixture.issuance.subject.clone(),
+            scope: fixture.issuance.scope.clone(),
+            work_schema: fixture.issuance.work_schema.clone(),
+            not_before_unix_ms: now - 1_000,
+            expires_at_unix_ms: now + 3_600_000,
+            max_uses: 1,
+            standing_ttl_ms: 60_000,
+            revocation_marker: owner.join("grant.revoked"),
+            use_journal: journal.clone(),
+        };
+        let grant_bytes = serde_json::to_vec_pretty(&grant).unwrap();
+        std::fs::write(owner.join("grant.json"), &grant_bytes).unwrap();
+        mode(&owner.join("grant.json"), 0o644);
+        let enrollment = GrantEnrollmentV1 {
+            schema: GRANT_ENROLLMENT_SCHEMA_V1.to_owned(),
+            principal: "test-owner".to_owned(),
+            grant: owner.join("grant.json"),
+            grant_sha256: sha256_digest(&grant_bytes),
+        };
+        let config = fixture.root.join("executor-config");
+        let deliver = |envelope: &[u8], trust_bytes: &[u8], executor: &Path| {
+            let (envelope, issuance) = verify_signed_issuance(envelope, trust_bytes)?;
+            let mut store = SqliteGovernedCustodyStoreV1::open(&fixture.database)?;
+            governed_service::accept(
+                &mut store,
+                &envelope,
+                &issuance,
+                &mut GrantStandingResolver {
+                    enrollment: &enrollment,
+                    trust: &trust,
+                },
+                &mut LocalGovernedExecutorV1 {
+                    program: executor,
+                    config: &config,
+                },
+                &mut SystemGovernedClockV1,
+            )
+        };
+        let count = |table: &str| -> i64 {
+            Connection::open(&fixture.database)
+                .unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+
+        // Docket accepts the grant-derived standing for the presented issuance.
+        let custody =
+            deliver(&fixture.envelope, &fixture.trust, &fixture.executor_program).unwrap();
+        let standing = hash_domain(
+            "docket.grant-execution-standing/v1",
+            &serde_json::to_vec(&serde_json::json!({
+                "grant": enrollment.grant_sha256,
+                "issuance": fixture.issuance.issuance,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(custody.execution_standing, standing);
+        assert_eq!(custody.attempt, fixture.custody.attempt);
+        let record = inspect(&fixture.database, &fixture.issuance.issuance)
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(record.status, GovernedRecordStatusV1::Settled);
+        assert_eq!(
+            record.settlement.unwrap().outcome,
+            KnownOutcomeWireV1::Success
+        );
+
+        // Redelivery of the same issuance is custody replay: no new standing use,
+        // no second attempt, no second executor delivery.
+        assert_eq!(
+            deliver(&fixture.envelope, &fixture.trust, &fixture.executor_program).unwrap(),
+            custody
+        );
+        assert_eq!(
+            std::fs::read(fixture.executor_program.with_extension("invocations")).unwrap(),
+            b"x"
+        );
+        assert_eq!(std::fs::read_dir(&journal).unwrap().count(), 1);
+
+        // A second AG issuance of the same work: the one-use grant is exhausted,
+        // so no standing is derived and Docket creates no second custody.
+        let (second_envelope, second, second_trust) =
+            signed_issuance("00000000-0000-0000-0000-000000000002", "ag-spend-2");
+        let second_executor = fixture.root.join("second-executor");
+        let second_attempt =
+            digest_json_string("ag.governed-loop.docket-attempt/v1", &second.issuance).unwrap();
+        write_executor(
+            &second_executor,
+            &DocketCustodyWireV1 {
+                attempt: second_attempt.clone(),
+                executor_marker: hash_domain(
+                    "docket.governed-loop.executor-marker/v1",
+                    second_attempt.as_bytes(),
+                ),
+                ..fixture.custody.clone()
+            },
+            ExecutorOutcomeClassWireV1::Success,
+            &digest("executor-receipt-2"),
+        );
+        assert_eq!(
+            deliver(&second_envelope, &second_trust, &second_executor).unwrap_err(),
+            "execution-standing-grant-exhausted"
+        );
+        assert!(inspect(&fixture.database, &second.issuance)
+            .unwrap()
+            .record
+            .is_none());
+        assert!(!second_executor.with_extension("invocations").exists());
+        assert_eq!(std::fs::read_dir(&journal).unwrap().count(), 1);
+
+        // Presenting the first issuance's derived standing for the second
+        // issuance fails Docket's unchanged binding check...
+        let first_standing = GrantStandingResolver {
+            enrollment: &enrollment,
+            trust: &trust,
+        }
+        .resolve(&ExecutionStandingRequestV1 {
+            schema: STANDING_REQUEST_SCHEMA_V1.to_owned(),
+            issuance: fixture.issuance.clone(),
+            now_unix_ms: now_unix_ms().unwrap(),
+        })
+        .unwrap();
+        assert_eq!(first_standing.execution_standing, standing);
+        let spliced = fixture.root.join("spliced-standing");
+        write_static_program(&spliced, &serde_json::to_string(&first_standing).unwrap());
+        assert_eq!(
+            accept(
+                &fixture.database,
+                &second_envelope,
+                &second_trust,
+                &spliced,
+                &second_executor,
+                &config,
+            )
+            .unwrap_err(),
+            "governed-execution-standing-binding-mismatch"
+        );
+        // ...and rebinding its identity to the second issuance is refused by
+        // Docket's one-custody-per-standing law.
+        let rebound = ExecutionStandingResolutionV1 {
+            issuance: second.issuance.clone(),
+            campaign: second.key.campaign.clone(),
+            occurrence: second.key.occurrence.clone(),
+            subject: second.subject.clone(),
+            scope: second.scope.clone(),
+            ..first_standing
+        };
+        write_static_program(&spliced, &serde_json::to_string(&rebound).unwrap());
+        let reused = accept(
+            &fixture.database,
+            &second_envelope,
+            &second_trust,
+            &spliced,
+            &second_executor,
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            reused.starts_with("governed-execution-standing-consume:"),
+            "{reused}"
+        );
+        assert!(!second_executor.with_extension("invocations").exists());
+        assert_eq!(
+            (
+                count("governed_loop_attempt"),
+                count("governed_execution_standing_use")
+            ),
+            (1, 1)
+        );
+    }
+
     fn digest(label: &str) -> String {
         hash_domain("docket-governed-loop-test/v1", label.as_bytes())
     }
