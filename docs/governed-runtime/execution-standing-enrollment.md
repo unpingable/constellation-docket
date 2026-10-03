@@ -50,4 +50,8 @@ The answer is the existing `docket.governed-loop.execution-standing-resolution/v
 5. Name `docket-standing-grant-resolver` as the Docket standing resolver in the AG runtime-profile enrollment and reseal the profile.
 6. Revoke by creating the marker (`touch`), or by removing the enrollment. Replace a grant only by writing a new grant, a new journal and a new pin. Never grant the consumer write access to the grant, its directory, the enrollment or the journal.
 
+### Torn journal entry
+
+A crash between the `O_EXCL` create of the next `use-NNNNNN.json` and its write leaves an empty or partial entry. The journal then fails closed for every issuance, new or already journaled (`execution-standing-grant-journal-entry-document`), so nothing more is derived from that grant. The use may or may not have reached custody; Docket's custody table, not the journal, says which (`docket governed-loop inspect` for the issuance the caller was presenting). Repair is an owner step, never an edit of the journal: keep the torn journal as evidence, write a new grant (new `grant_id`, the remaining uses as `max_uses`) with a new, empty journal directory, write its new pin into the enrollment, and only then resume. The old grant's journal is never reused.
+
 Declared limits, as for the projection reader: all-root co-located execution; root can replace enrollment, grant, journal and executable code, and in particular can delete or rewrite the newest journal entry without detection; no OS principal separation between the consumer, the AG issuer key and Docket; a forward-moving clock and timely owner revocation are premises; revocation after custody cannot undo a delivered effect.
