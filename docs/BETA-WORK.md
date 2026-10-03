@@ -48,6 +48,8 @@ Acceptance/evidence: Ordinary exact binding, expiry, revocation, ambiguity and r
 
 Owner decision recorded 2026-10-01: the root-controlling deployment/release operator owns principal, currentness and revocation; Docket consumes and enforces the enrolled projection. See [execution-standing-enrollment.md](governed-runtime/execution-standing-enrollment.md) for the installed contract.
 
+Amended 2026-10-03: the owner may enroll one bounded grant (exact subject, scope, work schema, window, use count, revocation reference) from which `docket-standing-grant-resolver` derives one standing per presented AG issuance; "no cached grant" now reads "no grant not enrolled by the owner". Binding, currentness, one-custody and settlement checks are unchanged.
+
 Owning issue: [DK-02](https://github.com/unpingable/constellation-docket/issues/3).
 
 ## DK-03: Decide experimental executor promotion prerequisites
