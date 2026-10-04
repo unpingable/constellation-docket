@@ -18,6 +18,8 @@ install -m 0755 "$bin_dir/docket-standing-resolver" "$d/usr/bin/docket-standing-
 install -m 0755 "$bin_dir/docket-standing-grant-resolver" "$d/usr/bin/docket-standing-grant-resolver"
 install -m 0644 "$root/LICENSE" "$d/usr/share/doc/constellation-docket/copyright"
 install -m 0644 "$root/packaging/README.md" "$d/usr/share/doc/constellation-docket/"
+install -m 0644 "$root/docs/governed-runtime/execution-standing-enrollment.md" \
+  "$d/usr/share/doc/constellation-docket/"
 cat > "$d/DEBIAN/control" <<CONTROL
 Package: constellation-docket
 Version: $version
