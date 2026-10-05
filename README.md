@@ -17,7 +17,7 @@ The trusted runtime establishes mechanical facts only; domain modules own semant
 judgments; labor providers produce candidate artifacts and untrusted provenance. The
 normative specification lives in `docs/governed-runtime/`.
 
-Docket is **agent-neutral but currently Git-effect-specific**: exactly one effect class
+The frozen Git-effect baseline is **agent-neutral and Git-effect-specific**: exactly one effect class
 is admitted — the atomic Git target-ref transition, `GitRefEffect` — and a proposal
 outside it is refused with a typed refusal *before* any standing is issued, any
 reservation is created, any dispatch identity is minted, or any provider runs

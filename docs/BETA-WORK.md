@@ -80,7 +80,7 @@ Intended outcome: Specify a reusable Docket certificate binding current source, 
 
 Scope/exclusions: No revival of qualification genealogy or old V1 production dispatch; no build or qualification launched by this plan.
 
-Dependencies: [PA-06](https://github.com/unpingable/cartography/issues/7) certificate/lifecycle design; [PA-11](https://github.com/unpingable/unpingable-site/issues/12) and [PA-12](https://github.com/unpingable/unpingable-site/issues/13) hermetic builder and runtime identity; current Docket dispatch/standing contracts.
+Dependencies: PA-06 (private program record) certificate/lifecycle design; [PA-11](https://github.com/unpingable/unpingable-site/issues/12) and [PA-12](https://github.com/unpingable/unpingable-site/issues/13) hermetic builder and runtime identity; current Docket dispatch/standing contracts.
 
 Acceptance/evidence: A specimen identifies exactly what later composition may consume and which changed inputs invalidate it; normal source checks plus separately admitted builder/package evidence establish a future generation.
 
