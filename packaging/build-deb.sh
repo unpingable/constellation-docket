@@ -27,7 +27,7 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Constellation contributors
-Depends: libc6 (>= 2.35)
+Depends: libc6 (>= 2.35), libgcc-s1
 Description: Docket governed-loop custody and reconciliation CLI
  Inert CLI payload. Installs no issuer trust, observer/executor enrollment,
  configuration, credentials or state. Experimental VM/session executors and
