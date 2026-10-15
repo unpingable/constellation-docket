@@ -4,6 +4,11 @@ use gwr_local::execution_standing::{
 };
 use gwr_runtime::governed_loop::ExecutionStandingRequestV1;
 fn run() -> Result<(), String> {
+    if gwr_local::build_info::write_if_requested("docket-standing-resolver")
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
     if std::env::args_os().len() != 1 {
         return Err("standing-resolver-takes-no-arguments".into());
     }

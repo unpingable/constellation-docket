@@ -10,11 +10,10 @@ use gwr_local::stage0_guest::proxy::{
 use gwr_local::{governed_loop, store::SqliteStore};
 use gwr_runtime::governed_loop::{
     digest_json_string, hash_domain, AgIssuanceWireV1, AgIssuerTrustConfigV1,
-    ExecutionStandingResolutionV1, ExecutionStandingStatusV1,
-    ExecutorDispatchWireV1, ExecutorOutcomeWireV1, GovernedRecordStatusV1,
-    IssuanceAuthenticationWireV1, OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1,
-    TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1, SIGNED_ISSUANCE_SCHEMA_V1,
-    STANDING_RESOLUTION_SCHEMA_V1,
+    ExecutionStandingResolutionV1, ExecutionStandingStatusV1, ExecutorDispatchWireV1,
+    ExecutorOutcomeWireV1, GovernedRecordStatusV1, IssuanceAuthenticationWireV1,
+    OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1, TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1,
+    SIGNED_ISSUANCE_SCHEMA_V1, STANDING_RESOLUTION_SCHEMA_V1,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
