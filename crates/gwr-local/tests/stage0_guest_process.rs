@@ -422,7 +422,7 @@ fn plan_id_binds_both_builds_protocol_and_static_configuration() {
 #[test]
 fn current_docket_refuses_unenrolled_stage0_proxy_before_guest_effect() {
     let root = TestRoot::new();
-    let (proxy, simulator, config, subject, scope, _) = proxy_fixture(&root);
+    let (proxy, _simulator, config, subject, scope, _) = proxy_fixture(&root);
     let plan = plan_id(&proxy, &config);
     let database = root.path().join("docket.sqlite");
     drop(SqliteStore::open(&database).unwrap());
@@ -486,7 +486,7 @@ fn current_docket_refuses_unenrolled_stage0_proxy_before_guest_effect() {
         }],
     })
     .unwrap();
-    let attempt =
+    let _attempt =
         digest_json_string("ag.governed-loop.docket-attempt/v1", &issuance.issuance).unwrap();
     let standing = ExecutionStandingResolutionV1 {
         schema: STANDING_RESOLUTION_SCHEMA_V1.to_owned(),
