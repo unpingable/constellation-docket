@@ -10,11 +10,10 @@ use gwr_local::stage0_guest::proxy::{
 use gwr_local::{governed_loop, store::SqliteStore};
 use gwr_runtime::governed_loop::{
     digest_json_string, hash_domain, AgIssuanceWireV1, AgIssuerTrustConfigV1,
-    ExecutionStandingResolutionV1, ExecutionStandingStatusV1,
-    ExecutorDispatchWireV1, ExecutorOutcomeWireV1, GovernedRecordStatusV1,
-    IssuanceAuthenticationWireV1, OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1,
-    TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1, SIGNED_ISSUANCE_SCHEMA_V1,
-    STANDING_RESOLUTION_SCHEMA_V1,
+    ExecutionStandingResolutionV1, ExecutionStandingStatusV1, ExecutorDispatchWireV1,
+    ExecutorOutcomeWireV1, GovernedRecordStatusV1, IssuanceAuthenticationWireV1,
+    OccurrenceKeyWireV1, SignedIssuanceEnvelopeWireV1, TrustedAgIssuerV1, AG_ISSUANCE_SCHEMA_V1,
+    SIGNED_ISSUANCE_SCHEMA_V1, STANDING_RESOLUTION_SCHEMA_V1,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
@@ -423,7 +422,7 @@ fn plan_id_binds_both_builds_protocol_and_static_configuration() {
 #[test]
 fn current_docket_refuses_unenrolled_stage0_proxy_before_guest_effect() {
     let root = TestRoot::new();
-    let (proxy, simulator, config, subject, scope, _) = proxy_fixture(&root);
+    let (proxy, _simulator, config, subject, scope, _) = proxy_fixture(&root);
     let plan = plan_id(&proxy, &config);
     let database = root.path().join("docket.sqlite");
     drop(SqliteStore::open(&database).unwrap());
@@ -487,7 +486,7 @@ fn current_docket_refuses_unenrolled_stage0_proxy_before_guest_effect() {
         }],
     })
     .unwrap();
-    let attempt =
+    let _attempt =
         digest_json_string("ag.governed-loop.docket-attempt/v1", &issuance.issuance).unwrap();
     let standing = ExecutionStandingResolutionV1 {
         schema: STANDING_RESOLUTION_SCHEMA_V1.to_owned(),
