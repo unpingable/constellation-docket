@@ -25,6 +25,7 @@ use gwr_local::campaign_export;
 use gwr_local::capabilities::StandingTokenCodec;
 use gwr_local::governed_loop;
 use gwr_local::providers::fake::{Script, ScriptedProvider};
+use gwr_local::store::external_preparation::{self, ExternalManifest};
 use gwr_local::store::SqliteStore;
 use gwr_runtime::ports::adapters::{Clock, IdSource};
 use gwr_runtime::ports::labor_provider::BoundedAssignment;
@@ -75,6 +76,8 @@ Repository identity:
 Governed workflow:
   request create
   prepare start | prepare poll
+  prepare import              Retain external bytes and unverified origin testimony
+  prepare inspect             Read external preparation binding and verify bytes
   candidate admit
   grant standing | ratify | reserve | dispatch
   observe | rely review-queue | reconcile
@@ -662,6 +665,25 @@ fn run(args: &[String]) -> Result<(), String> {
                 .create_work_request(&wr)
                 .map_err(|e| format!("{e:?}"))?;
             println!("work_request: {}", hex16s(wr.id.as_bytes()));
+            Ok(())
+        }
+        ["prepare", "import"] => {
+            let manifest = ExternalManifest::from_bytes(&external_preparation::read_bounded(
+                &PathBuf::from(need(args, "--manifest")?), external_preparation::MAX_MANIFEST_BYTES,
+            )?)?;
+            let patch = external_preparation::read_bounded(&PathBuf::from(need(args, "--patch")?), external_preparation::MAX_CANDIDATE_BYTES)?;
+            let request = WorkRequestId::from_bytes(parse16(&need(args, "--request")?)?);
+            let basis = need(args, "--basis")?;
+            let mut st = State::open(args)?;
+            let view = st.store.import_external_candidate(&st.dir, request, &basis, &manifest, &patch, &st.clock, &mut st.ids)?;
+            println!("{}", serde_json::to_string(&view).map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        ["prepare", "inspect"] => {
+            let mut st = State::open_read_only(args)?;
+            let run = PreparationRunId::from_bytes(parse16(&need(args, "--run")?)?);
+            let view = st.store.inspect_external_candidate(&st.dir, run)?;
+            println!("{}", serde_json::to_string(&view).map_err(|e| e.to_string())?);
             Ok(())
         }
         ["prepare", "start"] => {
@@ -1568,7 +1590,7 @@ fn run(args: &[String]) -> Result<(), String> {
         _ => Err(format!(
             "unknown command {cmd:?}; commands: repository register, repository relocate, \
              repository alias, repository show, repository migrate-attempt, request create, \
-             prepare start, prepare poll, \
+             prepare start, prepare poll, prepare import, prepare inspect, \
              candidate admit, grant standing, ratify, reserve, dispatch, observe, \
              rely review-queue, reconcile, recover fact, recover resolve, authz request, \
              authz accept, governed-loop accept, governed-loop reconcile-issuance, \

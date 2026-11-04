@@ -2,6 +2,7 @@
 //! projections plus immutable typed ledger records.
 
 pub(crate) mod codec;
+pub mod external_preparation;
 
 use codec::*;
 use gwr_core::authorization::{
@@ -41,6 +42,7 @@ const MIGRATION_0003: &str = include_str!("../../migrations/0003_authz_issuance.
 const MIGRATION_0004: &str = include_str!("../../migrations/0004_repository_registry.sql");
 const MIGRATION_0005: &str = include_str!("../../migrations/0005_campaign_stage_standing.sql");
 const MIGRATION_0006: &str = include_str!("../../migrations/0006_governed_loop_custody.sql");
+const MIGRATION_0007: &str = include_str!("../../migrations/0007_external_preparation.sql");
 
 pub struct SqliteStore {
     conn: Connection,
@@ -173,6 +175,7 @@ impl SqliteStore {
         // It shares neither authority nor storage with campaign-stage
         // standing, AG's spend journal, or executor-local idempotency state.
         conn.execute_batch(MIGRATION_0006).map_err(backend)?;
+        conn.execute_batch(MIGRATION_0007).map_err(backend)?;
         Ok(())
     }
 

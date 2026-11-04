@@ -1,0 +1,5 @@
+{
+  "repository_locator": "/example/registered-repository",
+  "target_ref": "refs/heads/result",
+  "binding_digest": "9ded366854de2d637d4f71cef103ceae07cc555adf1401a37d3fd13d98df9485"
+}

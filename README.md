@@ -78,6 +78,7 @@ might expect to be enforced are deliberately written down there as premises inst
 | Repository identity and ref-continuity handoff | [`repository-identity-and-ref-continuity.md`](docs/governed-runtime/repository-identity-and-ref-continuity.md) |
 | What effects are admissible | [`effect-classes.md`](docs/governed-runtime/effect-classes.md) |
 | What each outcome means and what to do next | [`operator-runbook.md`](docs/governed-runtime/operator-runbook.md) |
+| Retain a candidate prepared in an existing session | [`external-candidate-import-v1.md`](docs/governed-runtime/external-candidate-import-v1.md) |
 | First upstream-authorized governed change | [`vertical-01.md`](docs/vertical-01.md) |
 | How upstream authorization becomes local standing | [`upstream-authorization.md`](docs/governed-runtime/upstream-authorization.md) |
 

@@ -1,0 +1,6 @@
+diff --git a/work.txt b/work.txt
+--- a/work.txt
++++ b/work.txt
+@@ -1 +1 @@
+-before
++after

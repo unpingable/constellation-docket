@@ -43,6 +43,8 @@ fn root_help_exposes_bootstrap_workflow_and_runtime_dependencies() {
         "continuity subject",
         "governed-loop inspect",
         "prepare start",
+        "prepare import",
+        "prepare inspect",
         "dispatch",
         "show (--attempt <id> | --dispatch <id>) [--json]",
         "--provider fake",
