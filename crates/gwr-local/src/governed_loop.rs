@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_refusal_after_custody_reconciles_without_a_second_execute() {
+    fn unusable_acknowledgement_reconciles_after_standing_resolver_is_removed() {
         let fixture = fixture(ExecutorOutcomeClassWireV1::Success);
         std::fs::write(
             fixture.executor_program.with_extension("response"),
@@ -1224,6 +1224,7 @@ mod tests {
             GovernedRecordStatusV1::Indeterminate
         );
 
+        std::fs::remove_file(&fixture.standing_program).unwrap();
         write_executor(
             &fixture.executor_program,
             &custody,
@@ -1238,13 +1239,29 @@ mod tests {
             &fixture.root.join("executor-config"),
         )
         .unwrap();
-        assert!(matches!(
-            reconciled,
-            DocketReconciliationWireV1::Settled { .. }
-        ));
+        match &reconciled {
+            DocketReconciliationWireV1::Settled {
+                custody: retained, ..
+            } => {
+                assert_eq!(retained, &custody);
+            }
+            other => panic!("expected settled custody, got {other:?}"),
+        }
         assert_eq!(
             std::fs::read(fixture.executor_program.with_extension("invocations")).unwrap(),
             b"x"
+        );
+        std::fs::remove_file(&fixture.executor_program).unwrap();
+        assert_eq!(
+            reconcile(
+                &fixture.database,
+                &fixture.issuance.issuance,
+                Some(&custody.attempt),
+                &fixture.executor_program,
+                &fixture.root.join("executor-config"),
+            )
+            .unwrap(),
+            reconciled
         );
     }
 

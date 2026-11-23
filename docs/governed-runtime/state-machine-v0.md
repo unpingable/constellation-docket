@@ -3,6 +3,10 @@
 Terminology per `architecture-v0.md` and the packet glossary. Invariant numbers refer to
 `invariants-v0.md`.
 
+This state machine describes the Git-ref workflow, including `docket recover resolve`
+and its distinct recovery standing. The [governed-loop reconciliation command](operator-runbook.md#reconcile-an-existing-governed-loop-attempt)
+uses an existing attempt's custody and can record settlement without recovery standing.
+
 ## Execution states
 
 An attempt's execution state is exactly one of:

@@ -23,6 +23,43 @@ Recurring rules:
   locator. The complete contract and migration procedure are in
   [repository identity and ref continuity](repository-identity-and-ref-continuity.md).
 
+## Reconcile an existing governed-loop attempt
+
+Use the original state directory and issuance. First read the retained record
+without invoking the executor:
+
+```sh
+docket governed-loop inspect --state "$state" --issuance "$issuance"
+```
+
+Take the attempt digest from that record. Submit both digests to the exact-attempt
+form, with the absolute executor and configuration paths for the enrolled plan:
+
+```sh
+printf '{"issuance":"%s","attempt":"%s"}\n' "$issuance" "$attempt" |
+  docket governed-loop reconcile-attempt --state "$state" \
+    --executor "$executor" --executor-config "$executor_config"
+```
+
+Reconciliation uses custody already recorded at admission. It needs no new
+execution or recovery standing, so expired or unavailable standing cannot strand
+an otherwise reconcilable attempt. After checking the executor binding, Docket
+uses its `reconcile` operation to obtain outcome evidence and may record
+settlement for the same attempt. This path cannot dispatch again. A settled replay
+returns the retained outcome without consulting the executor. Indeterminate
+evidence leaves the attempt unsettled. Current service health alone cannot settle
+an earlier attempt.
+
+Docket checks the executor program digest and the plan identity returned by
+`plan-id`. The plan contract determines which configuration fields are covered.
+For example, the supported systemd V2 plan binds the attempt-store locator in its
+identity. Docket's generic check does not bind an independent digest of the
+configuration file bytes. Keep the enrolled plan and its evidence store in
+custody. See [the systemd composition failure cuts](operator-beta-systemd-composition-v1.md#failure-cuts-and-reconciliation).
+
+The Git-ref outcomes below use the separate `docket recover resolve` path and
+its recovery-standing requirement.
+
 ## Repository setup and continuity handoff
 
 For a new repository, run `docket repository register --repo <absolute-path>` in the
