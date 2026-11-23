@@ -6,6 +6,9 @@
 pub mod adapters;
 pub mod authz_intake;
 pub mod broker;
+#[cfg(test)]
+mod build_identity_input;
+pub mod build_info;
 pub mod campaign_export;
 pub mod capabilities;
 pub mod execution_standing;

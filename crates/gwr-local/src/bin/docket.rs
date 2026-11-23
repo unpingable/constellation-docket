@@ -56,6 +56,8 @@ Usage:
   docket <command> [options]
   docket --help
   docket -h
+  docket --version
+  docket --build-info
 
 Put the command before its options. Every stateful command requires
 --state <directory>; Docket creates an empty state directory on first use.
@@ -372,6 +374,9 @@ fn state_tag(state: &AttemptState) -> &'static str {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    if gwr_local::build_info::write_if_requested("docket").map_err(|error| error.to_string())? {
+        return Ok(());
+    }
     if matches!(args, [arg] if arg == "--help" || arg == "-h") {
         print!("{ROOT_HELP}");
         return Ok(());

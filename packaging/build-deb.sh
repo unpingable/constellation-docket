@@ -16,6 +16,8 @@ install -d -m 0755 "$d/DEBIAN" "$d/usr/bin" "$d/usr/share/doc/constellation-dock
 install -m 0755 "$bin_dir/docket" "$d/usr/bin/docket"
 install -m 0755 "$bin_dir/docket-standing-resolver" "$d/usr/bin/docket-standing-resolver"
 install -m 0755 "$bin_dir/docket-standing-grant-resolver" "$d/usr/bin/docket-standing-grant-resolver"
+python3 "$root/packaging/record-build-identity.py" "$d/usr/bin" "$version" "$arch" \
+  "$d/usr/share/doc/constellation-docket/build-identity.json"
 install -m 0644 "$root/LICENSE" "$d/usr/share/doc/constellation-docket/copyright"
 install -m 0644 "$root/packaging/README.md" "$d/usr/share/doc/constellation-docket/"
 install -m 0644 "$root/docs/governed-runtime/execution-standing-enrollment.md" \
@@ -35,4 +37,6 @@ Description: Docket governed-loop custody and reconciliation CLI
 CONTROL
 find "$d" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
 dpkg-deb --root-owner-group --build "$d" "$out_dir/constellation-docket_${version}_${arch}.deb" >/dev/null
+install -m 0644 "$d/usr/share/doc/constellation-docket/build-identity.json" \
+  "$out_dir/constellation-docket_${version}_${arch}.build-identity.json"
 (cd "$out_dir" && sha256sum "constellation-docket_${version}_${arch}.deb" > "constellation-docket_${version}_${arch}.deb.sha256")
