@@ -41,6 +41,35 @@ const MIGRATION_0003: &str = include_str!("../../migrations/0003_authz_issuance.
 const MIGRATION_0004: &str = include_str!("../../migrations/0004_repository_registry.sql");
 const MIGRATION_0005: &str = include_str!("../../migrations/0005_campaign_stage_standing.sql");
 const MIGRATION_0006: &str = include_str!("../../migrations/0006_governed_loop_custody.sql");
+const STATUS_SUMMARY_ROWS: usize = 4096;
+
+/// Versioned operator counts taken from a read-only custody snapshot.
+#[derive(serde::Serialize)]
+pub struct StatusSummaryV1 {
+    schema: &'static str,
+    governed_attempts: GovernedAttemptCounts,
+}
+
+#[derive(serde::Serialize)]
+struct GovernedAttemptCounts {
+    scope: &'static str,
+    coverage: SummaryCoverage,
+    row_limit: usize,
+    rows_counted: usize,
+    accepted: usize,
+    settled_success: usize,
+    settled_failure: usize,
+    indeterminate: usize,
+    other: usize,
+    oldest_counted_accepted_at_unix_ms: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SummaryCoverage {
+    Complete,
+    Truncated,
+}
 
 pub struct SqliteStore {
     conn: Connection,
@@ -94,6 +123,62 @@ impl SqliteStore {
             conn.prepare(query).map_err(backend)?;
         }
         Ok(Self { conn })
+    }
+
+    /// Count a bounded tail by the current schema's native rowid order. One
+    /// extra row distinguishes a complete snapshot from truncated coverage.
+    pub fn status_summary(path: &Path) -> Result<StatusSummaryV1, StoreError> {
+        let store = Self::open_read_only(path)?;
+        let mut query = store
+            .conn
+            .prepare(
+                "SELECT CASE
+                    WHEN status = 'accepted' AND outcome IS NULL
+                         AND typeof(accepted_at) = 'integer' AND accepted_at >= 0 THEN 1
+                    WHEN status = 'settled' AND outcome = 'success' THEN 2
+                    WHEN status = 'settled' AND outcome = 'failure' THEN 3
+                    WHEN status = 'indeterminate' THEN 4
+                    ELSE 0 END, accepted_at
+                 FROM governed_loop_attempt
+                 ORDER BY rowid DESC LIMIT ?1",
+            )
+            .map_err(backend)?;
+        let mut rows = query.query([STATUS_SUMMARY_ROWS + 1]).map_err(backend)?;
+        let mut counts = GovernedAttemptCounts {
+            scope: "retained_rowid_tail",
+            coverage: SummaryCoverage::Complete,
+            row_limit: STATUS_SUMMARY_ROWS,
+            rows_counted: 0,
+            accepted: 0,
+            settled_success: 0,
+            settled_failure: 0,
+            indeterminate: 0,
+            other: 0,
+            oldest_counted_accepted_at_unix_ms: None,
+        };
+        while let Some(row) = rows.next().map_err(backend)? {
+            if counts.rows_counted == counts.row_limit {
+                counts.coverage = SummaryCoverage::Truncated;
+                break;
+            }
+            counts.rows_counted += 1;
+            match row.get::<_, i64>(0).map_err(backend)? {
+                1 => {
+                    counts.accepted += 1;
+                    let at = row.get::<_, i64>(1).map_err(backend)?;
+                    let oldest = &mut counts.oldest_counted_accepted_at_unix_ms;
+                    *oldest = Some(oldest.map_or(at, |value| value.min(at)));
+                }
+                2 => counts.settled_success += 1,
+                3 => counts.settled_failure += 1,
+                4 => counts.indeterminate += 1,
+                _ => counts.other += 1,
+            }
+        }
+        Ok(StatusSummaryV1 {
+            schema: "gwr:docket-status-summary:v1",
+            governed_attempts: counts,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Self, StoreError> {

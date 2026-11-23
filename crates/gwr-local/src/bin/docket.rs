@@ -57,8 +57,8 @@ Usage:
   docket --help
   docket -h
 
-Put the command before its options. Every stateful command requires
---state <directory>; Docket creates an empty state directory on first use.
+Put the command before its options. Stateful commands require --state <directory>.
+Read-only commands require existing state.
 Repository paths are explicit absolute locators, never repository identity.
 
 Repository identity:
@@ -69,6 +69,7 @@ Repository identity:
   repository migrate-attempt  Explicitly bind one legacy work request
   continuity subject          Export the exact Docket-owned subject [--json]
   governed-loop inspect       Read one exact governed-loop issuance record
+  status-summary --json        Count a bounded tail of retained governed attempts (read-only)
 
 Governed workflow:
   request create
@@ -461,6 +462,20 @@ fn run(args: &[String]) -> Result<(), String> {
                 "{}",
                 serde_json::to_string(&response)
                     .map_err(|error| format!("governed inspection response: {error}"))?
+            );
+            Ok(())
+        }
+        ["status-summary"] => {
+            if !has(args, "--json") {
+                return Err("status-summary requires --json".into());
+            }
+            let state = PathBuf::from(need(args, "--state")?);
+            let summary = SqliteStore::status_summary(&state.join("state.sqlite"))
+                .map_err(|error| format!("status-summary: {error:?}"))?;
+            println!(
+                "{}",
+                serde_json::to_string(&summary)
+                    .map_err(|error| format!("status-summary response: {error}"))?
             );
             Ok(())
         }
@@ -1446,7 +1461,9 @@ fn run(args: &[String]) -> Result<(), String> {
         ["docket", "show"] | ["show"] | ["show-read-only"] => {
             let mut st = if cmd.as_slice() == ["show-read-only"] {
                 State::open_read_only(args)?
-            } else { State::open(args)? };
+            } else {
+                State::open(args)?
+            };
             let attempt = resolve_attempt(&mut st, args)?;
             // One canonical read model sources both surfaces; the human and
             // JSON renderings are pure functions of the same assembled value.
@@ -1567,7 +1584,8 @@ fn run(args: &[String]) -> Result<(), String> {
              candidate admit, grant standing, ratify, reserve, dispatch, observe, \
              rely review-queue, reconcile, recover fact, recover resolve, authz request, \
              authz accept, governed-loop accept, governed-loop reconcile-issuance, \
-             governed-loop reconcile-attempt, governed-loop inspect, docket list, docket show, docket journal, continuity subject, \
+             governed-loop reconcile-attempt, governed-loop inspect, status-summary, \
+             docket list, docket show, docket journal, continuity subject, \
              campaign propose-stage, campaign admit, campaign consume, campaign outcome, \
              campaign adjudicate, campaign export-repair-authority, \
              campaign verify-repair-authority, campaign show"
