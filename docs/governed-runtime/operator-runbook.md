@@ -23,6 +23,40 @@ Recurring rules:
   locator. The complete contract and migration procedure are in
   [repository identity and ref continuity](repository-identity-and-ref-continuity.md).
 
+## Governed attempt status summary
+
+Run the following against an existing Docket state directory.
+
+```sh
+docket status-summary --state /absolute/path/to/docket-state --json
+```
+
+The `gwr:docket-status-summary:v1` document contains a `governed_attempts`
+object with `scope: "retained_rowid_tail"`. In a single read-only SQLite
+snapshot, Docket counts at most 4,096 governed-attempt rows in descending
+SQLite rowid order. The current writer assigns rowids on insert. An extra row
+establishes whether coverage is complete. Rowids select the window independently
+of clock readings. `row_limit` and `rows_counted` give the limit and denominator.
+
+`coverage` is `complete` when the snapshot fits the limit and `truncated`
+when the window omits older rows. With truncated coverage, interpret every
+count within the selected window. An `accepted` count of zero leaves the
+state of the omitted rows unknown.
+
+The counts are `accepted`, `settled_success`, `settled_failure`,
+`indeterminate`, and `other`. `other` covers unrecognized row states,
+including an accepted row with an invalid timestamp. The
+`oldest_counted_accepted_at_unix_ms` field is the minimum retained Unix
+millisecond timestamp among counted accepted rows and is `null` when there
+are none. An exact empty store reports complete coverage and zero counts.
+
+The command opens the current schema read-only. SQLite can take normal
+reader locks and coordinate through its existing WAL reader files. A missing
+or incompatible store produces a nonzero exit and no JSON. For a specific
+obligation, use `docket governed-loop inspect --state DIR --issuance DIGEST`
+to read its persisted record. Decisions and settlement follow their existing
+governed commands.
+
 ## Repository setup and continuity handoff
 
 For a new repository, run `docket repository register --repo <absolute-path>` in the
